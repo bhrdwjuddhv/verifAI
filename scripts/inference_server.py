@@ -1,0 +1,408 @@
+"""VerifAI image deepfake inference service.
+
+Images only. Video and audio are Phase 4 — those requests are rejected rather than
+run through an image model and reported as a verdict.
+
+    python scripts/inference_server.py              # serves on 0.0.0.0:$PORT (default 8000)
+    python scripts/inference_server.py --selfcheck  # maths only: numpy + Pillow, no downloads
+    python scripts/inference_server.py --verify     # actually load the active model, then exit
+
+Model selection, in order:
+  1. models/deepfake_detector.pth from train_deepfake_detector.py  -> modelSource "trained_checkpoint"
+  2. a verified Hugging Face classifier                            -> modelSource "hf_fallback:<id>"
+  3. neither loads -> /predict returns 503. It never guesses.
+"""
+
+import argparse
+import io
+import os
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
+import numpy as np
+from PIL import Image, UnidentifiedImageError
+
+# scripts/ is on sys.path because this file lives there.
+from common.config import (
+    FAKE_ABOVE,
+    HF_FALLBACK_EXPECTS_FACE,
+    HF_FALLBACK_MODEL,
+    MODEL_PATH,
+    REAL_BELOW,
+)
+from common.xai import gradcam_overlay
+
+MAX_BYTES = 50 * 1024 * 1024
+FACE_MARGIN = float(os.environ.get("VERIFAI_FACE_MARGIN", "0.35"))
+GRADCAM = os.environ.get("VERIFAI_GRADCAM", "1") != "0"
+
+# Class names, from a checkpoint or from a HF config, say which side is which. Matching on
+# the name beats trusting an index: ImageFolder sorts alphabetically and 'Fake' < 'Real',
+# but a HF model can order its labels however it likes, and an inverted mapping reads as a
+# confidently wrong verdict rather than as a bug.
+FAKE_WORDS = ("fake", "deepfake", "artificial", "synthetic", "spoof", "gan", "generated")
+REAL_WORDS = ("real", "realism", "human", "authentic", "genuine", "natural", "pristine")
+
+
+def label_is_fake(name):
+    """True / False / None when the label name commits to neither."""
+    n = name.lower()
+    # Real first: 'realism' contains no fake word, but 'deepfake' contains no real word
+    # either, so order only matters for hybrids like 'real_vs_fake' — which is a folder
+    # name, not a class, and should fall through to None rather than pick a side.
+    real_hit = any(w in n for w in REAL_WORDS)
+    fake_hit = any(w in n for w in FAKE_WORDS)
+    if real_hit and fake_hit:
+        return None
+    if real_hit:
+        return False
+    if fake_hit:
+        return True
+    return None
+
+
+def fake_probability(probs, labels):
+    """P(fake) renormalized over the classes whose names commit to a side."""
+    fake = sum(p for p, l in zip(probs, labels) if label_is_fake(l) is True)
+    real = sum(p for p, l in zip(probs, labels) if label_is_fake(l) is False)
+    if fake + real <= 0:
+        raise RuntimeError(f"no class in {list(labels)} is identifiable as real or fake")
+    return fake / (fake + real)
+
+
+def fake_index(labels):
+    """Index of the fake class — the one Grad-CAM explains."""
+    for i, name in enumerate(labels):
+        if label_is_fake(name) is True:
+            return i
+    raise RuntimeError(f"no fake class in {list(labels)}")
+
+
+def verdict_for(fake_pct):
+    """(verdict, confidence-in-that-verdict). The middle band is an answer, not a failure."""
+    if fake_pct > FAKE_ABOVE:
+        return "fake", fake_pct
+    if fake_pct < REAL_BELOW:
+        return "real", 100.0 - fake_pct
+    return "uncertain", max(fake_pct, 100.0 - fake_pct)
+
+
+def frequency_score(img):
+    """Share of spectral energy above half-Nyquist, 0-100.
+
+    A descriptive statistic, NOT a probability and NOT part of the verdict. Diffusion
+    upsamplers and GAN checkerboarding leave energy up here — but so does a sharp camera,
+    and JPEG strips it from real and fake alike. Reported so a human can weigh it.
+    """
+    g = np.asarray(img.convert("L").resize((256, 256), Image.BILINEAR), dtype=np.float32) / 255.0
+    g = g - g.mean()
+    # Hann window: without it the image border is a step edge that dumps energy into every
+    # frequency, i.e. straight into the number we are trying to measure.
+    w = np.hanning(256)
+    mag = np.abs(np.fft.fftshift(np.fft.fft2(g * np.outer(w, w)))) ** 2
+    y, x = np.ogrid[-128:128, -128:128]
+    radius = np.sqrt(x * x + y * y)
+    total = float(mag.sum())
+    if total <= 0:
+        return 0.0
+    return float(100.0 * mag[radius > 64].sum() / total)
+
+
+def to_tensor(img, size):
+    import torch
+
+    arr = np.asarray(img.resize((size, size), Image.BILINEAR), dtype=np.float32) / 255.0
+    if arr.ndim == 2:
+        arr = np.stack([arr] * 3, axis=-1)
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    return torch.from_numpy(((arr - mean) / std).transpose(2, 0, 1)).float()
+
+
+def load_checkpoint_engine():
+    """The model we trained. Preprocessing settings ride along in the checkpoint."""
+    import torch
+    import torch.nn as nn
+    from torchvision import models
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    ckpt = torch.load(MODEL_PATH, map_location=device, weights_only=True)
+    classes = ckpt["classes"]
+    size = int(ckpt.get("img_size", 224))
+    temperature = float(ckpt.get("temperature", 1.0))
+
+    ctor = {"b0": models.efficientnet_b0, "b4": models.efficientnet_b4}[ckpt.get("arch", "b0")]
+    model = ctor()
+    model.classifier[1] = nn.Linear(model.classifier[1].in_features, len(classes))
+    model.load_state_dict(ckpt["state_dict"])
+    model.to(device).eval()
+
+    fake_i = fake_index(classes)
+
+    def predict(img):
+        t = to_tensor(img, size).unsqueeze(0).to(device)
+        with torch.no_grad():
+            batch = torch.cat([t, torch.flip(t, dims=[3])])  # flip TTA
+            probs = torch.softmax(model(batch).float() / temperature, dim=1).mean(dim=0).tolist()
+        heatmap = None
+        if GRADCAM:
+            heatmap = gradcam_overlay(model, t, fake_i, img.resize((size, size), Image.BILINEAR))
+        return fake_probability(probs, classes), heatmap
+
+    meta = {
+        "modelSource": "trained_checkpoint",
+        "classes": classes,
+        "expectsFace": bool(ckpt.get("face_crop", False)),
+        "calibrated": temperature != 1.0,
+        "device": str(device),
+        "valMetrics": ckpt.get("val_metrics"),
+    }
+    return predict, meta
+
+
+def load_hf_engine():
+    """Explicit, labelled fallback. Not our model, and the response says so."""
+    import torch
+    from transformers import AutoImageProcessor, AutoModelForImageClassification
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    processor = AutoImageProcessor.from_pretrained(HF_FALLBACK_MODEL)
+    model = AutoModelForImageClassification.from_pretrained(HF_FALLBACK_MODEL).to(device).eval()
+    labels = [model.config.id2label[i] for i in range(model.config.num_labels)]
+    if all(label_is_fake(l) is None for l in labels):
+        raise RuntimeError(f"{HF_FALLBACK_MODEL} labels {labels} do not say which class is fake")
+
+    fake_i = fake_index(labels)
+
+    def predict(img):
+        inputs = processor(images=img, return_tensors="pt").to(device)
+        with torch.no_grad():
+            probs = torch.softmax(model(**inputs).logits[0].float(), dim=0).tolist()
+        heatmap = None
+        if GRADCAM:
+            pixel_values = inputs["pixel_values"]
+            side = pixel_values.shape[-1]
+            heatmap = gradcam_overlay(model, pixel_values, fake_i, img.resize((side, side), Image.BILINEAR))
+        return fake_probability(probs, labels), heatmap
+
+    meta = {
+        "modelSource": f"hf_fallback:{HF_FALLBACK_MODEL}",
+        "classes": labels,
+        "expectsFace": HF_FALLBACK_EXPECTS_FACE,
+        "calibrated": False,  # nobody temperature-scaled this on our data
+        "device": str(device),
+        "valMetrics": None,
+    }
+    return predict, meta
+
+
+def load_engine():
+    if os.path.exists(MODEL_PATH):
+        print(f"[MODEL] checkpoint {MODEL_PATH}")
+        return load_checkpoint_engine()
+    print(f"[MODEL] no checkpoint at {MODEL_PATH} -> Hugging Face fallback {HF_FALLBACK_MODEL}")
+    return load_hf_engine()
+
+
+def load_face_detector():
+    """MTCNN, same detector and same crop geometry the training data was built with."""
+    try:
+        from preprocess_faces import load_detector
+
+        return load_detector(None)
+    except BaseException as e:  # load_detector calls sys.exit when facenet-pytorch is absent
+        print(f"[WARN] face detector unavailable ({e})")
+        return None
+
+
+PREDICT, META, LOAD_ERROR, DETECTOR = None, {}, None, None
+
+
+def startup():
+    global PREDICT, META, LOAD_ERROR, DETECTOR
+    try:
+        PREDICT, META = load_engine()
+    except Exception as e:
+        LOAD_ERROR = f"{type(e).__name__}: {e}"
+        print(f"[ERROR] no model loaded — /predict will return 503. {LOAD_ERROR}")
+        return
+    DETECTOR = load_face_detector()
+    print(f"[OK] {META['modelSource']} on {META['device']} | classes={META['classes']} "
+          f"| expectsFace={META['expectsFace']} | faceDetector={'on' if DETECTOR else 'off'}")
+
+
+def analyze(image):
+    """The whole verdict, as a dict. Kept out of the endpoint so it stays testable."""
+    from preprocess_faces import crop_face
+
+    notes = []
+    face_detected, crop = None, None
+    if DETECTOR is not None:
+        try:
+            crop = crop_face(DETECTOR, image, FACE_MARGIN)
+            face_detected = crop is not None
+        except Exception as e:
+            notes.append(f"face detection failed: {e}")
+
+    frequency = round(frequency_score(image))
+
+    if META["expectsFace"] and face_detected is False:
+        # A face-deepfake model on a landscape produces a number, not evidence.
+        return {
+            "verdict": "uncertain",
+            "confidence": 0,
+            "modelSource": META["modelSource"],
+            "faceDetected": False,
+            "signals": {"modelScore": None, "frequencyScore": frequency},
+            "heatmap": None,
+            "notes": notes + ["no face detected; the active model only applies to faces"],
+        }
+
+    target = crop if (META["expectsFace"] and crop is not None) else image
+    if META["expectsFace"] and DETECTOR is None:
+        notes.append("face detector unavailable; ran the full frame through a face model")
+
+    fake_prob, heatmap = PREDICT(target)
+    # Band the number we are going to SHOW. Deciding on 70.4 and displaying 70 next to a
+    # rule that says "above 70 is fake" is a contradiction the reader can see.
+    fake_pct = float(round(100.0 * fake_prob))
+    verdict, confidence = verdict_for(fake_pct)
+    if not META["calibrated"]:
+        notes.append("confidence is uncalibrated — treat it as a ranking, not a probability")
+    if heatmap is None and GRADCAM:
+        notes.append("no Grad-CAM heatmap for this model")
+
+    return {
+        "verdict": verdict,
+        "confidence": round(confidence),
+        "modelSource": META["modelSource"],
+        "faceDetected": face_detected,
+        "signals": {"modelScore": int(fake_pct), "frequencyScore": frequency},
+        "heatmap": heatmap,
+        "notes": notes,
+    }
+
+
+def create_app():
+    """App factory. Deploy with: uvicorn inference_server:create_app --factory --host 0.0.0.0"""
+    from fastapi import FastAPI, File, HTTPException, UploadFile
+    from fastapi.middleware.cors import CORSMiddleware
+
+    if PREDICT is None and LOAD_ERROR is None:
+        startup()
+
+    app = FastAPI(title="VerifAI Deepfake Inference", version="3.0.0")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=os.environ.get("VERIFAI_CORS_ORIGINS", "*").split(","),
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok" if PREDICT else "no_model", "error": LOAD_ERROR,
+                "faceDetector": DETECTOR is not None,
+                "thresholds": {"fakeAbove": FAKE_ABOVE, "realBelow": REAL_BELOW}, **META}
+
+    @app.post("/predict")
+    async def predict_image(file: UploadFile = File(...)):
+        if PREDICT is None:
+            raise HTTPException(status_code=503, detail=f"No model loaded: {LOAD_ERROR}")
+
+        contents = await file.read()
+        if len(contents) > MAX_BYTES:
+            raise HTTPException(status_code=413, detail="File exceeds 50MB limit.")
+        try:
+            image = Image.open(io.BytesIO(contents)).convert("RGB")
+        except (UnidentifiedImageError, OSError):
+            # TODO(Phase 4): video (frame sampling) and audio (mel-spectrogram + AASIST).
+            raise HTTPException(status_code=415, detail="Images only in this version.")
+
+        try:
+            return analyze(image)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+    return app
+
+
+def selfcheck():
+    """numpy + Pillow only. Covers the label mapping, the bands and the FFT statistic."""
+    assert label_is_fake("Fake") is True
+    assert label_is_fake("Deepfake") is True
+    assert label_is_fake("artificial") is True
+    assert label_is_fake("Real") is False
+    assert label_is_fake("Realism") is False, "the HF fallback's real class"
+    assert label_is_fake("human") is False
+    assert label_is_fake("class_0") is None
+    assert label_is_fake("real_vs_fake") is None, "ambiguous names must not pick a side"
+
+    # Label order must not change the answer — an inverted mapping is the bug this prevents.
+    assert abs(fake_probability([0.2, 0.8], ["Realism", "Deepfake"]) - 0.8) < 1e-9
+    assert abs(fake_probability([0.8, 0.2], ["Fake", "Real"]) - 0.8) < 1e-9
+    assert abs(fake_probability([0.5, 0.25, 0.25], ["junk", "Fake", "Real"]) - 0.5) < 1e-9
+    try:
+        fake_probability([1.0], ["class_0"])
+        raise AssertionError("unmappable labels must raise, not default to a verdict")
+    except RuntimeError:
+        pass
+
+    assert verdict_for(90.0)[0] == "fake"
+    assert verdict_for(5.0) == ("real", 95.0)
+    assert verdict_for(50.0)[0] == "uncertain"
+    assert verdict_for(70.0)[0] == "uncertain", "boundary is inclusive of uncertainty"
+    assert verdict_for(30.0)[0] == "uncertain"
+
+    # A smooth gradient is nearly all low frequency; per-pixel noise is not.
+    ramp = Image.fromarray(np.tile(np.linspace(0, 255, 256, dtype=np.uint8), (256, 1)))
+    rng = np.random.default_rng(0)
+    noise = Image.fromarray(rng.integers(0, 256, (256, 256), dtype=np.uint8))
+    flat = Image.new("L", (256, 256), 128)
+    assert frequency_score(ramp) < 5, frequency_score(ramp)
+    assert frequency_score(noise) > 40, frequency_score(noise)
+    assert frequency_score(flat) == 0.0, "a constant image has no energy to apportion"
+
+    assert fake_index(["Realism", "Deepfake"]) == 1
+    assert fake_index(["Fake", "Real"]) == 0
+
+    from common.xai import selfcheck as xai_selfcheck
+
+    xai_selfcheck()
+    print("selfcheck passed")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--selfcheck", action="store_true", help="run assertions and exit")
+    ap.add_argument("--verify", action="store_true", help="load the active model and exit")
+    args = ap.parse_args()
+
+    if args.selfcheck:
+        selfcheck()
+        return
+
+    if args.verify:
+        startup()
+        if PREDICT is None:
+            sys.exit(f"FAILED to load a model: {LOAD_ERROR}")
+        probe = Image.new("RGB", (256, 256), (127, 127, 127))
+        prob, heatmap = PREDICT(probe)
+        print(f"[VERIFY] {META['modelSource']} ran: P(fake)={100 * prob:.1f}% on a grey square")
+        print(f"[VERIFY] Grad-CAM: {'produced' if heatmap else 'unavailable'}")
+        return
+
+    import uvicorn
+
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "8000"))
+    print(f"[START] VerifAI inference -> http://{host}:{port}")
+    uvicorn.run(create_app(), host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()

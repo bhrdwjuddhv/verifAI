@@ -1,0 +1,22 @@
+# VerifAI model service (scripts/inference_server.py)
+#   pip install -r scripts/requirements.txt
+fastapi
+uvicorn[standard]
+python-multipart
+pillow
+numpy
+torch
+torchvision
+
+# Hugging Face fallback classifier, used when models/deepfake_detector.pth is absent.
+transformers
+
+# Grad-CAM explainability. Without it the service still answers, with heatmap: null.
+grad-cam
+
+# Face detection/cropping (MTCNN). Optional: without it the service still runs, reports
+# faceDetected: null, and says so in `notes`.
+facenet-pytorch
+
+# Training only (scripts/train_deepfake_detector.py, preprocess_faces.py):
+# kagglehub, pyyaml

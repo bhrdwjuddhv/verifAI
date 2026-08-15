@@ -1,0 +1,40 @@
+# Verifai Image & Deepfake Dataset Catalogue
+# Reference: https://github.com/Daisy-Zhang/Awesome-Deepfakes-Detection
+# Note: Most academic datasets require submitting an access form to the original authors.
+# Fill in your local path once access is granted.
+
+datasets:
+  manjilkarki:
+    name: "Kaggle Manjilkarki Deepfake Benchmark"
+    homepage: "https://www.kaggle.com/datasets/manjilkarki/deepfake-and-real-images"
+    access: "Public Kaggle Download"
+    expected_layout: "ImageFolder (Dataset/Train/Real, Dataset/Train/Fake)"
+    local_path: "data/Dataset"
+
+  faceforensics_pp:
+    name: "FaceForensics++ (FF++)"
+    homepage: "https://github.com/ondyari/FaceForensics"
+    access: "Academic Access Request Required (Fill Google Form on repo)"
+    expected_layout: "manipulated_sequences / original_sequences"
+    local_path: null
+
+  celeb_df:
+    name: "Celeb-DF (v2)"
+    homepage: "https://github.com/yuezunli/celeb-deepfakeforensics"
+    access: "Research Access Agreement Form Required"
+    expected_layout: "Celeb-real / Celeb-synthesis / YouTube-real"
+    local_path: null
+
+  dfdc:
+    name: "Deepfake Detection Challenge (DFDC)"
+    homepage: "https://www.kaggle.com/c/deepfake-detection-challenge"
+    access: "Kaggle Competition Dataset Rules Acceptance Required"
+    expected_layout: "dfdc_train_part_* / metadata.json"
+    local_path: null
+
+  wild_deepfake:
+    name: "WildDeepfake"
+    homepage: "https://github.com/deepfakeinthewild/wild-deepfake"
+    access: "GitHub / Google Drive Request"
+    expected_layout: "real / fake"
+    local_path: null
