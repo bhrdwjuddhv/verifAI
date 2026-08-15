@@ -40,7 +40,10 @@ export async function callModelService(file: Blob, filename: string): Promise<Mo
         'bypass-tunnel-reminder': 'true',
       },
       body: form,
-      signal: AbortSignal.timeout(30000),
+      // A sleeping free-tier instance takes ~60s to wake, and the lean build needs ~6s after
+      // that. Must stay under the route's maxDuration of 60s, or Vercel kills the function
+      // first and the user gets a generic error instead of our "unavailable" message.
+      signal: AbortSignal.timeout(55000),
     });
 
     if (!res.ok) {

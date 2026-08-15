@@ -444,17 +444,23 @@ def create_app():
     )
 
     @app.get("/health")
+    # Platforms probe "/" by default (Render logs it as HEAD / -> 404 and calls the service
+    # unhealthy), so the root is the same handler rather than a 404 waiting to cause a restart.
+    @app.get("/")
     def health():
         return {"status": "ok" if PREDICT else "no_model", "error": LOAD_ERROR,
                 "faceDetector": DETECTOR is not None,
                 "thresholds": {"fakeAbove": FAKE_ABOVE, "realBelow": REAL_BELOW}, **META}
 
+    # Deliberately `def`, not `async def`: inference is CPU-bound and would otherwise block
+    # the event loop for its whole duration, starving the platform's health checks until it
+    # restarts the container mid-request. FastAPI runs sync endpoints in a threadpool.
     @app.post("/predict")
-    async def predict_image(file: UploadFile = File(...)):
+    def predict_image(file: UploadFile = File(...)):
         if PREDICT is None:
             raise HTTPException(status_code=503, detail=f"No model loaded: {LOAD_ERROR}")
 
-        contents = await file.read()
+        contents = file.file.read()
         if len(contents) > MAX_BYTES:
             raise HTTPException(status_code=413, detail="File exceeds 50MB limit.")
         try:

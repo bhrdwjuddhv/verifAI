@@ -67,7 +67,7 @@ The Admin Portal is a dedicated, authenticated route for team members to run dir
 
 ### Accessing the Portal
 1. Navigate to `http://localhost:3000/admin/login` (or access `/admin`).
-2. Passphrase: Set `ADMIN_PASSWORD` env var (Default dev passphrase: `admin123`).
+2. Create an account first: `npx tsx scripts/create-admin.ts` — logins are email + bcrypt hash in `data/users.json`. There is no `ADMIN_PASSWORD` env var; the code authenticates against that file.
 
 ### Key Features
 - **Direct Real Model Scan (`/api/admin/scan`)**: Posts media to `$MODEL_SERVICE_URL/predict` through the same client the public route uses, and reports the model's response verbatim. If the service is down it returns an explicit error — there is no heuristic fallback anywhere in the app.
@@ -180,7 +180,6 @@ scripts/
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ADMIN_PASSWORD` | `admin123` | Passphrase required to log into the Admin Portal |
 | `JWT_SECRET` | `verifai-secret...` | Secret key used to sign admin session cookies |
 | `MODEL_SERVICE_URL` | *(none — required)* | URL of the deployed model service, no trailing slash. Unset = every scan reports "Analysis unavailable" |
 | `VERIFAI_MODEL` | `models/deepfake_detector.pth` | Checkpoint path, read by the model service (see `scripts/README_inference.md` for the rest) |

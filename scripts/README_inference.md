@@ -109,7 +109,23 @@ Every host injects `$PORT`; the image's `CMD` already reads it.
 | `VERIFAI_THREADS` | `2` | ONNX intra-op threads. Match your instance's vCPUs. |
 | `VERIFAI_BATCH` | `8` | Forward-pass chunk. Lower = less peak RAM, slower. |
 | `VERIFAI_SALIENCY_GRID` | `5` | Occlusion grid. 5 = 25 extra forwards (~4s); 7 is sharper and ~2x slower. |
-| `VERIFAI_GRADCAM` | `1` | `0` disables the heatmap entirely — roughly 5x faster, no explanation. |
+| `VERIFAI_GRADCAM` | `1` | `0` disables the heatmap entirely. |
+
+Measured on one dev core, one image, lean build:
+
+| Setting | Time |
+|---|---|
+| `VERIFAI_GRADCAM=0` (no heatmap) | **0.96s** |
+| `VERIFAI_SALIENCY_GRID=3` | 4.4s |
+| `VERIFAI_SALIENCY_GRID=5` | 5.6s |
+
+The heatmap is ~80% of the request. A Render **free** instance gets 0.1 CPU — roughly 10x
+slower — so a scan with saliency lands near a minute there and the platform's proxy gives up
+with a 502. On free tiers set `VERIFAI_GRADCAM=0`; the verdict still takes ~10s.
+
+`/predict` is a sync endpoint on purpose, so FastAPI runs it in a threadpool and `/health`
+keeps answering during a scan. As an `async def` it blocked the event loop, health checks
+timed out, and the platform restarted the container mid-request.
 
 Then set `MODEL_SERVICE_URL` in the Next.js app to the deployed URL (no trailing slash).
 
