@@ -46,8 +46,16 @@ venv/
 # training artifacts & datasets
 /models/
 /public/models/
-/data/
 /runs/
+
+# data/ holds two different things: seed JSON that the eval routes import at BUILD time
+# (must be committed, or Vercel fails with "Can't resolve @/data/..."), and runtime state
+# with password hashes and sessions (must never be). Exclude the contents, re-include the
+# three seed files by name — a negation cannot rescue a file whose parent dir is excluded.
+/data/*
+!/data/fusion-weights.json
+!/data/judged-results.json
+!/data/weight-history.json
 *.pt
 # binaries
 ngrok.exe

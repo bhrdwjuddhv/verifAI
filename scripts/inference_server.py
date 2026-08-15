@@ -8,13 +8,15 @@ run through an image model and reported as a verdict.
     python scripts/inference_server.py --verify     # actually load the active model, then exit
 
 Model selection, in order:
-  1. models/deepfake_detector.pth from train_deepfake_detector.py  -> modelSource "trained_checkpoint"
-  2. a verified Hugging Face classifier                            -> modelSource "hf_fallback:<id>"
-  3. neither loads -> /predict returns 503. It never guesses.
+  1. models/deepfake_detector.pth from train_deepfake_detector.py  -> "trained_checkpoint"
+  2. models/detector.onnx from export_onnx.py (torch-free build)   -> "onnx:<source>[+int8]"
+  3. a verified Hugging Face classifier                            -> "hf_fallback:<id>"
+  4. none loads -> /predict returns 503. It never guesses.
 """
 
 import argparse
 import io
+import json
 import os
 import sys
 
@@ -34,7 +36,11 @@ from common.config import (
     MODEL_PATH,
     REAL_BELOW,
 )
-from common.xai import gradcam_overlay
+from common.xai import encode_overlay, gradcam_overlay
+
+# Torch-free build artifacts (see export_onnx.py and the Dockerfile's lean stage).
+ONNX_PATH = os.environ.get("VERIFAI_ONNX", os.path.join("models", "detector.onnx"))
+YUNET_PATH = os.environ.get("VERIFAI_YUNET", os.path.join("models", "face_detection_yunet.onnx"))
 
 MAX_BYTES = 50 * 1024 * 1024
 FACE_MARGIN = float(os.environ.get("VERIFAI_FACE_MARGIN", "0.35"))
@@ -112,15 +118,23 @@ def frequency_score(img):
     return float(100.0 * mag[radius > 64].sum() / total)
 
 
-def to_tensor(img, size):
-    import torch
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
 
+
+def to_array(img, size, mean=IMAGENET_MEAN, std=IMAGENET_STD):
+    """PIL image -> (1, 3, size, size) float32, normalized. numpy only — no torch."""
     arr = np.asarray(img.resize((size, size), Image.BILINEAR), dtype=np.float32) / 255.0
     if arr.ndim == 2:
         arr = np.stack([arr] * 3, axis=-1)
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-    return torch.from_numpy(((arr - mean) / std).transpose(2, 0, 1)).float()
+    arr = (arr - np.array(mean, dtype=np.float32)) / np.array(std, dtype=np.float32)
+    return arr.transpose(2, 0, 1)[None].astype(np.float32)
+
+
+def to_tensor(img, size):
+    import torch
+
+    return torch.from_numpy(to_array(img, size)[0])
 
 
 def load_checkpoint_engine():
@@ -164,6 +178,93 @@ def load_checkpoint_engine():
     return predict, meta
 
 
+def load_onnx_engine():
+    """The lean build: ONNX Runtime, no torch, no transformers.
+
+    torch plus a ViT-base measures ~1.2GB resident, which does not fit a 512MB instance. This
+    path is the same model exported by export_onnx.py, typically int8-quantized. Grad-CAM needs
+    gradients that ONNX Runtime does not provide, so explainability here is occlusion saliency:
+    hide a patch, see how much the fake score drops. Slower, coarser, and it measures the
+    model's actual behaviour rather than its internal activations.
+    """
+    import onnxruntime as ort
+
+    with open(os.path.splitext(ONNX_PATH)[0] + ".json") as fh:
+        meta_file = json.load(fh)
+
+    labels = meta_file["labels"]
+    size = int(meta_file.get("imgSize", 224))
+    mean = meta_file.get("mean", IMAGENET_MEAN)
+    std = meta_file.get("std", IMAGENET_STD)
+    temperature = float(meta_file.get("temperature", 1.0))
+    fake_i = fake_index(labels)
+
+    options = ort.SessionOptions()
+    # A ViT's attention buffers scale with batch size, and ORT's arena keeps the high-water
+    # mark for the process lifetime. Both settings trade a little speed for a much lower
+    # resident ceiling, which is the entire point of this build.
+    options.enable_cpu_mem_arena = False
+    options.intra_op_num_threads = int(os.environ.get("VERIFAI_THREADS", "2"))
+    session = ort.InferenceSession(ONNX_PATH, sess_options=options, providers=["CPUExecutionProvider"])
+    input_name = session.get_inputs()[0].name
+    chunk = int(os.environ.get("VERIFAI_BATCH", "8"))
+
+    def run(batch):
+        outs = [session.run(None, {input_name: batch[i:i + chunk]})[0] for i in range(0, len(batch), chunk)]
+        logits = np.concatenate(outs).astype(np.float32) / temperature
+        e = np.exp(logits - logits.max(axis=1, keepdims=True))
+        return e / e.sum(axis=1, keepdims=True)
+
+    def predict(img):
+        arr = to_array(img, size, mean, std)
+        probs = run(np.concatenate([arr, arr[:, :, :, ::-1]]))  # flip TTA
+        heatmap = None
+        if GRADCAM:
+            heatmap = occlusion_overlay(run, arr, fake_i, img.resize((size, size), Image.BILINEAR))
+        return fake_probability(probs.mean(axis=0).tolist(), labels), heatmap
+
+    source = meta_file.get("source", "onnx")
+    if meta_file.get("quantized"):
+        source += "+int8"
+    meta = {
+        "modelSource": f"onnx:{source}",
+        "classes": labels,
+        "expectsFace": bool(meta_file.get("expectsFace", True)),
+        "calibrated": bool(meta_file.get("calibrated", False)),
+        "device": "cpu (onnxruntime)",
+        "valMetrics": meta_file.get("valMetrics"),
+        "quantized": bool(meta_file.get("quantized")),
+    }
+    return predict, meta
+
+
+SALIENCY_GRID = int(os.environ.get("VERIFAI_SALIENCY_GRID", "5"))
+
+
+def occlusion_overlay(run, arr, fake_i, base_image, grid=SALIENCY_GRID):
+    """Saliency by occlusion: how far does P(fake) fall when each patch is hidden?
+
+    One batched forward of grid² masked copies. Patches are filled with 0 — which is the
+    dataset mean after normalization, i.e. "no information" rather than "black square".
+    """
+    base = float(run(arr)[0, fake_i])
+    cells = np.repeat(arr, grid * grid, axis=0)
+    side = arr.shape[-1]
+    step = side / grid
+    for k in range(grid * grid):
+        r, c = divmod(k, grid)
+        y0, y1 = int(r * step), int((r + 1) * step)
+        x0, x1 = int(c * step), int((c + 1) * step)
+        cells[k, :, y0:y1, x0:x1] = 0.0
+
+    drops = base - run(cells)[:, fake_i]
+    saliency = np.clip(drops.reshape(grid, grid), 0, None)
+    peak = saliency.max()
+    if peak <= 0:
+        return None  # nothing changed the score: no honest heatmap to draw
+    return encode_overlay(saliency / peak, base_image)
+
+
 def load_hf_engine():
     """Explicit, labelled fallback. Not our model, and the response says so."""
     import torch
@@ -204,19 +305,56 @@ def load_engine():
     if os.path.exists(MODEL_PATH):
         print(f"[MODEL] checkpoint {MODEL_PATH}")
         return load_checkpoint_engine()
+    if os.path.exists(ONNX_PATH):
+        print(f"[MODEL] ONNX {ONNX_PATH} (torch-free build)")
+        return load_onnx_engine()
     print(f"[MODEL] no checkpoint at {MODEL_PATH} -> Hugging Face fallback {HF_FALLBACK_MODEL}")
     return load_hf_engine()
 
 
+class YuNetDetector:
+    """OpenCV's YuNet, wrapped to look like MTCNN so crop_face() works unchanged.
+
+    A 340KB ONNX model against facenet-pytorch's torch dependency. This is what makes the
+    lean image possible — the classifier is not the only thing that was dragging torch in.
+    """
+
+    def __init__(self, model_path):
+        import cv2
+
+        self.cv2 = cv2
+        self.net = cv2.FaceDetectorYN.create(model_path, "", (320, 320), score_threshold=0.7)
+
+    def detect(self, img):
+        arr = np.asarray(img.convert("RGB"))[:, :, ::-1]  # PIL RGB -> OpenCV BGR
+        self.net.setInputSize((arr.shape[1], arr.shape[0]))
+        _, faces = self.net.detect(arr)
+        if faces is None or len(faces) == 0:
+            return None, None
+        # YuNet rows are [x, y, w, h, ...landmarks..., score]; largest face first.
+        faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+        x, y, w, h = faces[0][:4]
+        return [[x, y, x + w, y + h]], [float(faces[0][-1])]
+
+
 def load_face_detector():
-    """MTCNN, same detector and same crop geometry the training data was built with."""
+    """MTCNN when torch is present, YuNet when it is not, None when neither is."""
     try:
         from preprocess_faces import load_detector
 
         return load_detector(None)
     except BaseException as e:  # load_detector calls sys.exit when facenet-pytorch is absent
-        print(f"[WARN] face detector unavailable ({e})")
-        return None
+        print(f"[INFO] MTCNN unavailable ({str(e).splitlines()[0]})")
+
+    if os.path.exists(YUNET_PATH):
+        try:
+            print(f"[FACE] YuNet {YUNET_PATH}")
+            return YuNetDetector(YUNET_PATH)
+        except Exception as e:
+            print(f"[WARN] YuNet failed to load ({e})")
+
+    print("[WARN] no face detector available")
+    return None
 
 
 PREDICT, META, LOAD_ERROR, DETECTOR = None, {}, None, None
@@ -274,7 +412,9 @@ def analyze(image):
     if not META["calibrated"]:
         notes.append("confidence is uncalibrated — treat it as a ranking, not a probability")
     if heatmap is None and GRADCAM:
-        notes.append("no Grad-CAM heatmap for this model")
+        notes.append("no explanation heatmap available for this model")
+    if META.get("quantized"):
+        notes.append("int8-quantized build; scores can differ from the full-precision model by a point or two")
 
     return {
         "verdict": verdict,
@@ -370,6 +510,23 @@ def selfcheck():
     assert fake_index(["Realism", "Deepfake"]) == 1
     assert fake_index(["Fake", "Real"]) == 0
 
+    # Occlusion saliency, with a stub model that only reacts to the top-left corner: the
+    # overlay must appear there, and a model that ignores every patch must yield no heatmap
+    # rather than a picture of nothing.
+    probe = np.zeros((1, 3, 32, 32), dtype=np.float32)
+
+    def corner_run(batch):
+        # P(fake) is high unless the top-left cell is blanked.
+        lit = batch[:, 0, 0:6, 0:6].reshape(len(batch), -1).any(axis=1)
+        return np.stack([1.0 - lit * 0.9, 0.1 + lit * 0.9], axis=1).astype(np.float32)
+
+    probe[:, :, 0:6, 0:6] = 1.0
+    url = occlusion_overlay(corner_run, probe, 1, Image.new("RGB", (32, 32)), grid=4)
+    assert url and url.startswith("data:image/png;base64,")
+    flat = occlusion_overlay(lambda b: np.tile([[0.5, 0.5]], (len(b), 1)).astype(np.float32),
+                             probe, 1, Image.new("RGB", (32, 32)), grid=4)
+    assert flat is None, "a model whose score never moves has nothing to explain"
+
     from common.xai import selfcheck as xai_selfcheck
 
     xai_selfcheck()
@@ -393,7 +550,7 @@ def main():
         probe = Image.new("RGB", (256, 256), (127, 127, 127))
         prob, heatmap = PREDICT(probe)
         print(f"[VERIFY] {META['modelSource']} ran: P(fake)={100 * prob:.1f}% on a grey square")
-        print(f"[VERIFY] Grad-CAM: {'produced' if heatmap else 'unavailable'}")
+        print(f"[VERIFY] explanation heatmap: {'produced' if heatmap else 'unavailable'}")
         return
 
     import uvicorn

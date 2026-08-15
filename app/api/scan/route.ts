@@ -1,4 +1,7 @@
 export const dynamic = 'force-dynamic';
+// CPU inference plus a cold start on the model service can exceed the 10s Vercel default.
+// The client below gives up at 30s, so this must stay above that.
+export const maxDuration = 60;
 
 import { NextRequest, NextResponse } from 'next/server';
 import { validateFileContent, isFileTooLarge } from '@/lib/admin/file-validation';

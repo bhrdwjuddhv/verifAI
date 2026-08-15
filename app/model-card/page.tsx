@@ -54,6 +54,11 @@ export default function ModelCardPage() {
               <span className="font-mono">Realism</span> / <span className="font-mono">Deepfake</span>
               ). Used when no locally trained checkpoint is present.
             </Row>
+            <Row label="Lean deployment">
+              <span className="font-mono text-brand-blue-300">onnx:…+int8</span> — the same weights
+              exported to ONNX and int8-quantized so the service fits a 512MB instance. Scores shift
+              by a point or two versus full precision; the response says so in its notes.
+            </Row>
             <Row label="Trained option">
               <span className="font-mono text-brand-blue-300">trained_checkpoint</span> — EfficientNet
               (B0 or B4) fine-tuned by <span className="font-mono">scripts/train_deepfake_detector.py</span>,
@@ -143,9 +148,11 @@ export default function ModelCardPage() {
         <section className="mt-10 mb-10">
           <h2 className="text-lg font-semibold mb-2">Explainability</h2>
           <p className="text-sm text-ink-300 font-normal leading-relaxed">
-            Each verdict ships a Grad-CAM overlay showing which regions moved the model’s score. It
-            reveals where the model looked — it is not evidence that those regions were edited, and a
-            confident-looking heatmap over a wrong verdict is still a wrong verdict.
+            Each verdict ships a heatmap showing which regions moved the model’s score: Grad-CAM in
+            the full build, occlusion saliency (hide a patch, measure the drop) in the lean ONNX
+            build. Either way it reveals where the model looked — it is not evidence that those
+            regions were edited, and a confident-looking heatmap over a wrong verdict is still a
+            wrong verdict.
           </p>
         </section>
       </div>

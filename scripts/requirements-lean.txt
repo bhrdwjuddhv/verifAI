@@ -1,0 +1,12 @@
+# Torch-free runtime for the model service. Measured 205MB resident (peak 306MB) versus
+# 1262MB for the torch build — the difference between fitting a 512MB instance and not.
+#
+# Needs models/detector.onnx + models/detector.json from export_onnx.py, and
+# models/face_detection_yunet.onnx from OpenCV Zoo. The Dockerfile builds both.
+fastapi
+uvicorn[standard]
+python-multipart
+pillow
+numpy
+onnxruntime
+opencv-python-headless

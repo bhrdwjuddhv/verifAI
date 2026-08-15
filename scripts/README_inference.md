@@ -5,6 +5,21 @@ The Next.js app talks to it over `MODEL_SERVICE_URL`; it never runs a model itse
 
 **Images only.** Video and audio are Phase 4 — those uploads get a `415`, not a verdict.
 
+## Two builds
+
+| | torch build | **lean build** (default Docker target) |
+|---|---|---|
+| Model | fp32 via PyTorch / transformers | same weights, int8 ONNX |
+| Face detector | MTCNN (facenet-pytorch) | YuNet (OpenCV, 230KB) |
+| Explanation | Grad-CAM | occlusion saliency |
+| **Measured RSS** | **1262MB** (peak 1268) | **205MB** (peak 306) |
+| Latency, 1 image, 2 threads | ~1–2s | ~5.6s with saliency |
+| Fits a 512MB instance | no | yes |
+
+Same API, same verdict logic, same thresholds. `modelSource` says which one answered
+(`onnx:...+int8` for the lean build), and the lean build adds a note that int8 shifts scores
+by a point or two. Measured on the same photo: 83% fp32 vs 81% int8.
+
 ## Run it locally
 
 ```bash
@@ -22,8 +37,9 @@ python scripts/inference_server.py               # serves on 0.0.0.0:8000
 | Condition | `modelSource` |
 |---|---|
 | `models/deepfake_detector.pth` exists (from `train_deepfake_detector.py`) | `trained_checkpoint` |
-| No checkpoint | `hf_fallback:<id>` — default `prithivMLmods/Deep-Fake-Detector-v2-Model` |
-| Neither loads | `/predict` returns **503**. It does not guess. |
+| `models/detector.onnx` exists (from `export_onnx.py`) | `onnx:<source>[+int8]` |
+| Neither file | `hf_fallback:<id>` — default `prithivMLmods/Deep-Fake-Detector-v2-Model` |
+| None of them loads | `/predict` returns **503**. It does not guess. |
 
 The fallback is a **face** deepfake classifier (ViT, 224px, labels `Realism`/`Deepfake`). If no
 face is found in the upload, the verdict is `uncertain` and the response says why — a face model
@@ -66,23 +82,34 @@ on a landscape produces a number, not evidence.
 
 ## Deploy
 
-All four read `$PORT` and want the same command:
+`scripts/Dockerfile` is multi-stage: stage 1 installs torch only long enough to export and verify
+an int8 ONNX model, then throws it away. The shipped image has no torch at all.
 
+```bash
+docker build -t verifai-model ./scripts          # lean, ~205MB RSS
+docker build --target torch -t verifai-torch ./scripts   # fp32 + Grad-CAM, ~1.2GB RSS
+docker run -p 8000:8000 verifai-model
 ```
-uvicorn inference_server:create_app --factory --host 0.0.0.0 --port $PORT
-```
 
-(run it from `scripts/`, or `cd scripts` in the start command).
+The export step fails the build if the ONNX model disagrees with the torch model it came from, so
+a bad quantization cannot ship silently.
 
-- **Hugging Face Inference Endpoints** — closest fit if you rely on the HF fallback: the weights are
-  already cached in the image. Push `scripts/` as a Space (Docker SDK) or use a custom handler.
-- **Modal** — best for GPU-on-demand and cold-start-free model loading; wrap `create_app()` in an
-  `@modal.asgi_app()`. Cheapest option if traffic is bursty.
-- **Render / Railway** — plain container. Build `pip install -r scripts/requirements.txt`, start with
-  the command above. CPU-only inference on a ViT-base is ~1–2s per image; fine for demos.
+- **Render / Railway / Fly free tiers (512MB)** — the lean image fits. Give it 1 worker.
+- **Google Cloud Run** — scale-to-zero, free request allowance:
+  `gcloud run deploy verifai-model --source scripts --memory 1Gi --allow-unauthenticated`
+- **Local + tunnel** — for a demo: run the service and expose it with ngrok or localtunnel. The
+  Next.js client already sends both services' skip-interstitial headers.
 
-Whichever you pick: bake the model into the image or mount a volume, otherwise every cold start
-re-downloads ~350MB from Hugging Face.
+Every host injects `$PORT`; the image's `CMD` already reads it.
+
+### Tuning the lean build
+
+| Var | Default | Effect |
+|---|---|---|
+| `VERIFAI_THREADS` | `2` | ONNX intra-op threads. Match your instance's vCPUs. |
+| `VERIFAI_BATCH` | `8` | Forward-pass chunk. Lower = less peak RAM, slower. |
+| `VERIFAI_SALIENCY_GRID` | `5` | Occlusion grid. 5 = 25 extra forwards (~4s); 7 is sharper and ~2x slower. |
+| `VERIFAI_GRADCAM` | `1` | `0` disables the heatmap entirely — roughly 5x faster, no explanation. |
 
 Then set `MODEL_SERVICE_URL` in the Next.js app to the deployed URL (no trailing slash).
 
