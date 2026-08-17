@@ -36,7 +36,9 @@ export const ReportPanel: React.FC<ReportPanelProps> = ({ result, onReset }) => 
       `VerifAI ${result.id} — ${result.filename}`,
       `Verdict: ${result.verdict.label} (confidence ${result.confidence}%)`,
       `Model: ${result.modelSource}`,
-      `P(AI-generated or manipulated): ${result.signals.modelScore ?? 'not measured'}%`,
+      `Combined P(AI-generated or manipulated): ${result.score === null ? 'not measured' : 100 - result.score}%`,
+      `Face classifier: ${result.signals.modelScore ?? 'did not apply'}%`,
+      `AI-generation detector (NPR): ${result.signals.nprScore ?? 'unavailable'}%`,
       `High-frequency energy share: ${result.signals.frequencyScore ?? 'not measured'}%`,
       `Face detected: ${result.signals.faceDetected === null ? 'detector unavailable' : result.signals.faceDetected ? 'yes' : 'no'}`,
       `Scanned ${result.timestamp}`,
@@ -51,11 +53,24 @@ export const ReportPanel: React.FC<ReportPanelProps> = ({ result, onReset }) => 
   };
 
   // Only measured values get a bar. Nothing is padded out to fill the chart.
+  // Face and NPR are shown as P(fake) — the direction they were measured in — while the
+  // headline ring stays "likelihood real". Flipping one of them to match the other would
+  // misrepresent what the detector reported.
   const chartData = [
     result.score !== null && {
       name: 'Likelihood Real',
       score: result.score,
       color: result.verdict.ringColor,
+    },
+    result.signals.modelScore !== null && {
+      name: 'Face: P(fake)',
+      score: result.signals.modelScore,
+      color: '#F472B6',
+    },
+    result.signals.nprScore !== null && {
+      name: 'AI-gen: P(fake)',
+      score: result.signals.nprScore,
+      color: '#A78BFA',
     },
     result.signals.frequencyScore !== null && {
       name: 'High-Freq Energy',
@@ -266,7 +281,7 @@ export const ReportPanel: React.FC<ReportPanelProps> = ({ result, onReset }) => 
                 Nothing was measured for this file.
               </p>
             ) : (
-              <div className="h-44 w-full">
+              <div className="h-56 w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart
                     data={chartData}
@@ -302,9 +317,11 @@ export const ReportPanel: React.FC<ReportPanelProps> = ({ result, onReset }) => 
             )}
 
             <p className="text-[11px] text-ink-500 mt-2 font-normal leading-relaxed">
-              “Likelihood Real” is 100 minus the model’s P(AI-generated). “High-Freq Energy” is the
-              share of image detail above half-Nyquist — descriptive only; a sharp camera photo
-              scores high too, and it does not move the verdict.
+              “Likelihood Real” is 100 minus the combined score. “Face” is the face-swap
+              classifier and “AI-gen” is the whole-image generation detector, both as P(fake) —
+              they can disagree, and the verdict sits between them by the configured weights.
+              “High-Freq Energy” is descriptive only: a sharp camera photo scores high too, and it
+              carries no weight in the verdict.
             </p>
           </div>
         </div>

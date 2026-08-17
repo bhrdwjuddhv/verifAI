@@ -5,8 +5,10 @@ export type ScanStatus = 'idle' | 'uploading' | 'analyzing' | 'complete' | 'erro
 
 /** Everything here is measured. A field is null when it was not measured — never filled in. */
 export interface ScanSignals {
-  /** Model P(AI-generated or manipulated), 0-100. Null when the model did not apply. */
+  /** Face classifier P(swapped/manipulated face), 0-100. Null when it did not apply. */
   modelScore: number | null;
+  /** NPR whole-image AI-generation detector, 0-100. Null when unavailable. */
+  nprScore: number | null;
   /** Share of FFT energy above half-Nyquist, 0-100. Descriptive statistic, not a probability. */
   frequencyScore: number | null;
   faceDetected: boolean | null;
@@ -35,8 +37,10 @@ export interface ScanResult {
   reasons: string[];
   signals: ScanSignals;
   metadata: MetadataSignal;
-  /** "trained_checkpoint" or "hf_fallback:<id>" — which model actually produced this. */
+  /** Which model(s) actually produced this — e.g. "onnx:…+int8 + onnx:npr…". */
   modelSource: string;
+  /** Weights that combined the signals into the verdict, and which ones voted. */
+  fusion?: { weights: Record<string, number>; used: Record<string, number> };
   /** Grad-CAM overlay as a data URL, when the active model supports it. */
   heatmap: string | null;
   /** Caveats from the model service. Display them. */

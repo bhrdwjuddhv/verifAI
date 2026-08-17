@@ -143,7 +143,11 @@ export async function POST(req: NextRequest) {
     const category = CATEGORY[model.verdict] ?? 'uncertain';
     const metadata = readMetadataSignal(fileBuffer);
     const modelScore = model.signals.modelScore;
-    const score = modelScore === null ? null : 100 - modelScore;
+    const nprScore = model.signals.nprScore ?? null;
+    // The fused probability is what the verdict is based on; fall back to the single face
+    // score only for an older service that predates fusion.
+    const fused = model.fakeProbability ?? modelScore;
+    const score = fused === null || fused === undefined ? null : 100 - fused;
 
     // Every reason below is a restatement of something that was actually measured.
     const reasons: string[] = [];
@@ -155,11 +159,24 @@ export async function POST(req: NextRequest) {
       reasons.push('Face detection was unavailable on the model service.');
     }
     if (modelScore !== null) {
-      reasons.push(
-        `The model scored this ${modelScore}% likely AI-generated or manipulated (thresholds: above 70 fake, below 30 real).`
-      );
+      reasons.push(`Face classifier: ${modelScore}% likely swapped or manipulated.`);
     } else {
-      reasons.push('The model was not applied to this image, so there is no model score.');
+      reasons.push('Face classifier did not apply to this image, so it did not vote.');
+    }
+    if (nprScore !== null) {
+      reasons.push(
+        `Whole-image AI-generation detector (NPR): ${nprScore}% likely generated. This one catches fully synthetic images, including generated faces.`
+      );
+    }
+    if (fused !== null && fused !== undefined) {
+      const used = model.fusion?.used ?? {};
+      const blend = Object.entries(used)
+        .filter(([, w]) => w > 0)
+        .map(([k, w]) => `${k} ${w}`)
+        .join(', ');
+      reasons.push(
+        `Combined score: ${fused}% likely AI-generated or manipulated${blend ? ` (weights: ${blend})` : ''}. Thresholds: above 70 fake, below 30 real, in between uncertain.`
+      );
     }
     if (model.signals.frequencyScore !== null) {
       reasons.push(
@@ -171,14 +188,16 @@ export async function POST(req: NextRequest) {
     reasons.push(...model.notes);
 
     const base = VERDICT_CONFIG[category];
+    const detectorCount = Object.keys(model.fusion?.used ?? {}).length;
+    const across = detectorCount > 1 ? ` across ${detectorCount} detectors` : '';
     const laymanSummary =
-      modelScore === null
-        ? `No verdict: ${model.notes[0] ?? 'the model did not apply to this file'}.`
+      fused === null || fused === undefined
+        ? `No verdict: ${model.notes[0] ?? 'no detector applied to this file'}.`
         : category === 'manipulated'
-        ? `The model scored this ${modelScore}% likely AI-generated or manipulated.`
+        ? `The detectors scored this ${fused}% likely AI-generated or manipulated${across}.`
         : category === 'genuine'
-        ? `The model scored this ${100 - modelScore}% likely real.`
-        : `The model scored this ${modelScore}% likely AI-generated — inside the uncertain band (30–70%), so it is not calling it either way.`;
+        ? `The detectors scored this ${100 - fused}% likely real${across}.`
+        : `The combined score is ${fused}% likely AI-generated — inside the uncertain band (30–70%), so it is not calling it either way.`;
 
     const verdict = { ...base, description: base.description, laymanSummary };
 
@@ -193,11 +212,13 @@ export async function POST(req: NextRequest) {
       reasons,
       signals: {
         modelScore,
+        nprScore,
         frequencyScore: model.signals.frequencyScore,
         faceDetected: model.faceDetected,
       },
       metadata,
       modelSource: model.modelSource,
+      fusion: model.fusion,
       heatmap: model.heatmap ?? null,
       notes: model.notes,
       timestamp: new Date().toISOString(),

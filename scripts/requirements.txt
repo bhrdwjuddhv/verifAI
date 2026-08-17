@@ -14,6 +14,9 @@ transformers
 # Grad-CAM explainability. Without it the service still answers, with heatmap: null.
 grad-cam
 
+# The NPR whole-image detector runs from ONNX in both builds.
+onnxruntime
+
 # Face detection/cropping (MTCNN). Optional: without it the service still runs, reports
 # faceDetected: null, and says so in `notes`.
 facenet-pytorch

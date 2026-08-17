@@ -28,6 +28,7 @@ DATASETS = [
 
 # Shared with inference_server.py so the two can never drift apart again.
 from common.config import MODEL_PATH as MODEL_SAVE_PATH
+from common.metrics import binary_auc
 
 ONNX_SAVE_PATH = "public/models/deepfake_detector.onnx"
 
@@ -355,26 +356,6 @@ def set_backbone_trainable(model, trainable):
     for name, param in model.named_parameters():
         if not name.startswith("classifier"):
             param.requires_grad = trainable
-
-
-def binary_auc(scores, labels):
-    """ROC-AUC via the rank-sum identity. Ties get averaged ranks."""
-    pairs = sorted(zip(scores, labels))
-    ranks, i = [0.0] * len(pairs), 0
-    while i < len(pairs):
-        j = i
-        while j + 1 < len(pairs) and pairs[j + 1][0] == pairs[i][0]:
-            j += 1
-        avg = (i + j) / 2.0 + 1.0
-        for k in range(i, j + 1):
-            ranks[k] = avg
-        i = j + 1
-    n_pos = sum(1 for _, l in pairs if l == 1)
-    n_neg = len(pairs) - n_pos
-    if n_pos == 0 or n_neg == 0:
-        return float("nan")
-    rank_sum = sum(r for r, (_, l) in zip(ranks, pairs) if l == 1)
-    return (rank_sum - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
 
 
 @torch.no_grad()

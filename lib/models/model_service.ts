@@ -4,9 +4,19 @@ import { MetadataSignal } from '@/lib/store';
 export interface ModelServiceResult {
   verdict: 'real' | 'fake' | 'uncertain';
   confidence: number;
+  /** Fused P(fake) the verdict is based on. Null when no detector applied. */
+  fakeProbability?: number | null;
   modelSource: string;
   faceDetected: boolean | null;
-  signals: { modelScore: number | null; frequencyScore: number | null };
+  signals: {
+    modelScore: number | null;
+    /** NPR whole-image AI-generation detector, P(fake) percent. */
+    nprScore?: number | null;
+    frequencyScore: number | null;
+  };
+  /** Which detectors were loaded, and the weights that combined them. */
+  detectors?: { face: string | null; npr: string | null };
+  fusion?: { weights: Record<string, number>; used: Record<string, number> };
   notes: string[];
   heatmap?: string | null;
 }

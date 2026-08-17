@@ -26,7 +26,13 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-from common.config import HF_FALLBACK_EXPECTS_FACE, HF_FALLBACK_MODEL, MODEL_PATH
+from common.config import (
+    HF_FALLBACK_EXPECTS_FACE,
+    HF_FALLBACK_MODEL,
+    MODEL_PATH,
+    NPR_CHECKPOINT,
+    NPR_MODEL_PATH,
+)
 
 ONNX_PATH = os.environ.get("VERIFAI_ONNX", os.path.join("models", "detector.onnx"))
 META_PATH = os.path.splitext(ONNX_PATH)[0] + ".json"
@@ -92,16 +98,47 @@ def load_checkpoint():
     return model, meta
 
 
+def load_npr_for_export(path):
+    """NPR outputs one logit, not class probabilities — sigmoid, no label vocabulary."""
+    from models.npr_model import IMG_SIZE, MEAN, STD, load_npr
+
+    meta = {
+        "source": f"npr:{os.path.basename(path)}",
+        "labels": None,
+        "sigmoid": True,
+        "imgSize": IMG_SIZE,
+        "mean": MEAN,
+        "std": STD,
+        "expectsFace": False,
+        "calibrated": False,
+    }
+    return load_npr(path), meta
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", action="store_true", help=f"export {MODEL_PATH} instead of the HF model")
+    ap.add_argument("--npr", action="store_true",
+                    help=f"export the NPR whole-image detector ({NPR_CHECKPOINT} -> {NPR_MODEL_PATH})")
     ap.add_argument("--no-quantize", action="store_true", help="keep fp32 (4x larger, bit-exact)")
-    ap.add_argument("--out", default=ONNX_PATH)
+    ap.add_argument("--out", default=None)
     args = ap.parse_args()
+    if args.out is None:
+        args.out = NPR_MODEL_PATH if args.npr else ONNX_PATH
 
     import torch
 
-    if args.checkpoint:
+    if args.npr:
+        if not os.path.exists(NPR_CHECKPOINT):
+            sys.exit(
+                f"No NPR checkpoint at {NPR_CHECKPOINT}.\n"
+                f"  Train one:  python scripts/train_npr.py --data-dir <real-vs-ai dataset>\n"
+                f"  Or use the official ProGAN-trained weights:\n"
+                f"    curl -L -o {NPR_CHECKPOINT} https://github.com/chuangchuangtan/"
+                f"NPR-DeepfakeDetection/raw/main/model_epoch_last_3090.pth"
+            )
+        model, meta = load_npr_for_export(NPR_CHECKPOINT)
+    elif args.checkpoint:
         if not os.path.exists(MODEL_PATH):
             sys.exit(f"No checkpoint at {MODEL_PATH}.")
         model, meta = load_checkpoint()
@@ -160,13 +197,19 @@ def verify(onnx_path, meta, torch_model, side):
     rng = np.random.default_rng(0)
     x = rng.standard_normal((2, 3, side, side)).astype(np.float32)
 
+    def to_prob_torch(logits):
+        return torch.sigmoid(logits) if meta.get("sigmoid") else torch.softmax(logits, dim=1)
+
     with torch.no_grad():
-        ref = torch.softmax(torch_model(torch.from_numpy(x)).float(), dim=1).numpy()
+        ref = to_prob_torch(torch_model(torch.from_numpy(x)).float()).numpy()
     got = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"]).run(
         None, {"pixel_values": x}
     )[0]
-    got = np.exp(got - got.max(1, keepdims=True))
-    got = got / got.sum(1, keepdims=True)
+    if meta.get("sigmoid"):
+        got = 1.0 / (1.0 + np.exp(-got))
+    else:
+        got = np.exp(got - got.max(1, keepdims=True))
+        got = got / got.sum(1, keepdims=True)
 
     delta = float(np.abs(ref - got).max())
     tol = 0.08 if meta.get("quantized") else 1e-3

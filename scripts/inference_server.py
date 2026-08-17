@@ -31,9 +31,11 @@ from PIL import Image, UnidentifiedImageError
 # scripts/ is on sys.path because this file lives there.
 from common.config import (
     FAKE_ABOVE,
+    FUSION_WEIGHTS,
     HF_FALLBACK_EXPECTS_FACE,
     HF_FALLBACK_MODEL,
     MODEL_PATH,
+    NPR_MODEL_PATH,
     REAL_BELOW,
 )
 from common.xai import encode_overlay, gradcam_overlay
@@ -88,6 +90,22 @@ def fake_index(labels):
     raise RuntimeError(f"no fake class in {list(labels)}")
 
 
+def fuse(scores, weights=None):
+    """Weighted mean of the signals that actually ran. Returns (fused_pct, used) or (None, {}).
+
+    Renormalizing over what is present is the whole point: no face means no face score, and a
+    missing signal must not drag the average toward 50 as if it had voted "don't know".
+    """
+    weights = FUSION_WEIGHTS if weights is None else weights
+    # Weight 0 means "reported, not trusted" — it must not appear as a voter.
+    used = {k: weights.get(k, 0.0) for k, v in scores.items() if v is not None and weights.get(k, 0.0) > 0}
+    total = sum(used.values())
+    if not used or total <= 0:
+        return None, {}
+    fused = sum(scores[k] * w for k, w in used.items()) / total
+    return float(round(fused)), used
+
+
 def verdict_for(fake_pct):
     """(verdict, confidence-in-that-verdict). The middle band is an answer, not a failure."""
     if fake_pct > FAKE_ABOVE:
@@ -122,9 +140,25 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
-def to_array(img, size, mean=IMAGENET_MEAN, std=IMAGENET_STD):
-    """PIL image -> (1, 3, size, size) float32, normalized. numpy only — no torch."""
-    arr = np.asarray(img.resize((size, size), Image.BILINEAR), dtype=np.float32) / 255.0
+def to_array(img, size, mean=IMAGENET_MEAN, std=IMAGENET_STD, crop=False):
+    """PIL image -> (1, 3, size, size) float32, normalized. numpy only — no torch.
+
+    crop=True centre-crops at native resolution instead of resizing. NPR measures the
+    generator's up-sampling artifact, and resizing lays our own resampling over exactly the
+    signal being read — so it only scales up when the image is smaller than the crop.
+    """
+    if crop:
+        w, h = img.size
+        if w < size or h < size:
+            s = size / min(w, h)
+            img = img.resize((max(size, int(w * s)), max(size, int(h * s))), Image.BICUBIC)
+            w, h = img.size
+        left, top = (w - size) // 2, (h - size) // 2
+        img = img.crop((left, top, left + size, top + size))
+    else:
+        img = img.resize((size, size), Image.BILINEAR)
+
+    arr = np.asarray(img, dtype=np.float32) / 255.0
     if arr.ndim == 2:
         arr = np.stack([arr] * 3, axis=-1)
     arr = (arr - np.array(mean, dtype=np.float32)) / np.array(std, dtype=np.float32)
@@ -301,6 +335,49 @@ def load_hf_engine():
     return predict, meta
 
 
+def load_npr_engine():
+    """NPR: whole-image AI-generation detector, ONNX only. Returns (predict, meta).
+
+    Separate from the face classifier on purpose — they answer different questions. The face
+    model asks "was this face swapped", NPR asks "did a generator's decoder make these pixels",
+    which is the question a fully generated StyleGAN face fails the first test on.
+    """
+    if not os.path.exists(NPR_MODEL_PATH):
+        return None, {"available": False, "reason": f"no NPR model at {NPR_MODEL_PATH}"}
+    try:
+        import onnxruntime as ort
+    except ImportError as e:
+        return None, {"available": False, "reason": f"onnxruntime missing ({e})"}
+
+    try:
+        with open(os.path.splitext(NPR_MODEL_PATH)[0] + ".json") as fh:
+            meta_file = json.load(fh)
+
+        size = int(meta_file.get("imgSize", 224))
+        mean = meta_file.get("mean", IMAGENET_MEAN)
+        std = meta_file.get("std", IMAGENET_STD)
+
+        options = ort.SessionOptions()
+        options.enable_cpu_mem_arena = False
+        options.intra_op_num_threads = int(os.environ.get("VERIFAI_THREADS", "2"))
+        session = ort.InferenceSession(NPR_MODEL_PATH, sess_options=options,
+                                       providers=["CPUExecutionProvider"])
+        input_name = session.get_inputs()[0].name
+
+        def predict(img):
+            arr = to_array(img, size, mean, std, crop=True)
+            logit = float(session.run(None, {input_name: arr})[0].reshape(-1)[0])
+            return 1.0 / (1.0 + np.exp(-logit))  # official convention: 1 = fake
+
+        source = meta_file.get("source", "npr")
+        if meta_file.get("quantized"):
+            source += "+int8"
+        return predict, {"available": True, "modelSource": f"onnx:{source}",
+                         "calibrated": bool(meta_file.get("calibrated"))}
+    except Exception as e:
+        return None, {"available": False, "reason": f"{type(e).__name__}: {e}"}
+
+
 def load_engine():
     if os.path.exists(MODEL_PATH):
         print(f"[MODEL] checkpoint {MODEL_PATH}")
@@ -358,15 +435,20 @@ def load_face_detector():
 
 
 PREDICT, META, LOAD_ERROR, DETECTOR = None, {}, None, None
+NPR_PREDICT, NPR_META = None, {"available": False, "reason": "not loaded"}
 
 
 def startup():
-    global PREDICT, META, LOAD_ERROR, DETECTOR
+    global PREDICT, META, LOAD_ERROR, DETECTOR, NPR_PREDICT, NPR_META
+    NPR_PREDICT, NPR_META = load_npr_engine()
+    print(f"[NPR] {NPR_META.get('modelSource') if NPR_PREDICT else 'unavailable — ' + NPR_META['reason']}")
     try:
         PREDICT, META = load_engine()
     except Exception as e:
         LOAD_ERROR = f"{type(e).__name__}: {e}"
-        print(f"[ERROR] no model loaded — /predict will return 503. {LOAD_ERROR}")
+        print(f"[ERROR] no face model loaded. {LOAD_ERROR}")
+        if NPR_PREDICT is None:
+            print("[ERROR] no detector at all — /predict will return 503.")
         return
     DETECTOR = load_face_detector()
     print(f"[OK] {META['modelSource']} on {META['device']} | classes={META['classes']} "
@@ -388,40 +470,78 @@ def analyze(image):
 
     frequency = round(frequency_score(image))
 
-    if META["expectsFace"] and face_detected is False:
-        # A face-deepfake model on a landscape produces a number, not evidence.
+    # NPR reads the whole frame and needs no face, so it runs on everything.
+    npr_pct = None
+    if NPR_PREDICT is not None:
+        try:
+            npr_pct = round(100.0 * NPR_PREDICT(image))
+        except Exception as e:
+            notes.append(f"NPR detector failed: {e}")
+
+    # Face classifier: only where it applies. A face model on a landscape produces a number,
+    # not evidence, so it abstains rather than voting.
+    face_pct, heatmap = None, None
+    if PREDICT is not None and not (META["expectsFace"] and face_detected is False):
+        target = crop if (META["expectsFace"] and crop is not None) else image
+        if META["expectsFace"] and DETECTOR is None:
+            notes.append("face detector unavailable; ran the full frame through a face model")
+        try:
+            fake_prob, heatmap = PREDICT(target)
+            # Band the number we are going to SHOW. Deciding on 70.4 and displaying 70 next to
+            # a rule that says "above 70 is fake" is a contradiction the reader can see.
+            face_pct = float(round(100.0 * fake_prob))
+        except Exception as e:
+            notes.append(f"face classifier failed: {e}")
+    elif PREDICT is None:
+        notes.append(f"face classifier unavailable ({LOAD_ERROR})")
+    else:
+        notes.append("no face detected — the face classifier does not apply, so it did not vote")
+
+    fused, used = fuse({"face": face_pct, "npr": npr_pct, "frequency": float(frequency)})
+
+    if fused is None:
         return {
             "verdict": "uncertain",
             "confidence": 0,
-            "modelSource": META["modelSource"],
-            "faceDetected": False,
-            "signals": {"modelScore": None, "frequencyScore": frequency},
+            "fakeProbability": None,
+            "modelSource": NPR_META.get("modelSource") or META.get("modelSource"),
+            "detectors": {"face": META.get("modelSource") if PREDICT else None,
+                          "npr": NPR_META.get("modelSource") if NPR_PREDICT else None},
+            "faceDetected": face_detected,
+            "signals": {"modelScore": face_pct, "nprScore": npr_pct, "frequencyScore": frequency},
+            "fusion": {"weights": FUSION_WEIGHTS, "used": {}},
             "heatmap": None,
-            "notes": notes + ["no face detected; the active model only applies to faces"],
+            "notes": notes + ["no detector applied to this file, so there is no verdict"],
         }
 
-    target = crop if (META["expectsFace"] and crop is not None) else image
-    if META["expectsFace"] and DETECTOR is None:
-        notes.append("face detector unavailable; ran the full frame through a face model")
-
-    fake_prob, heatmap = PREDICT(target)
-    # Band the number we are going to SHOW. Deciding on 70.4 and displaying 70 next to a
-    # rule that says "above 70 is fake" is a contradiction the reader can see.
-    fake_pct = float(round(100.0 * fake_prob))
-    verdict, confidence = verdict_for(fake_pct)
-    if not META["calibrated"]:
+    verdict, confidence = verdict_for(fused)
+    if not META.get("calibrated", False):
         notes.append("confidence is uncalibrated — treat it as a ranking, not a probability")
-    if heatmap is None and GRADCAM:
+    if heatmap is None and GRADCAM and face_pct is not None:
         notes.append("no explanation heatmap available for this model")
     if META.get("quantized"):
         notes.append("int8-quantized build; scores can differ from the full-precision model by a point or two")
+    if npr_pct is None:
+        notes.append(f"NPR whole-image detector unavailable ({NPR_META.get('reason')}) — a fully "
+                     "generated image may not be caught by the face model alone")
+    if len(used) > 1 and face_pct is not None and npr_pct is not None and abs(face_pct - npr_pct) > 50:
+        notes.append(f"the detectors disagree sharply (face {face_pct:.0f}% vs NPR {npr_pct:.0f}%); "
+                     "the fused score sits between them, which is why this may read as uncertain")
 
     return {
         "verdict": verdict,
         "confidence": round(confidence),
-        "modelSource": META["modelSource"],
+        # The fused number the verdict is actually based on.
+        "fakeProbability": int(fused),
+        "modelSource": " + ".join(
+            s for s in (META.get("modelSource") if face_pct is not None else None,
+                        NPR_META.get("modelSource") if npr_pct is not None else None) if s
+        ),
+        "detectors": {"face": META.get("modelSource") if PREDICT else None,
+                      "npr": NPR_META.get("modelSource") if NPR_PREDICT else None},
         "faceDetected": face_detected,
-        "signals": {"modelScore": int(fake_pct), "frequencyScore": frequency},
+        "signals": {"modelScore": face_pct, "nprScore": npr_pct, "frequencyScore": frequency},
+        "fusion": {"weights": FUSION_WEIGHTS, "used": used},
         "heatmap": heatmap,
         "notes": notes,
     }
@@ -448,8 +568,9 @@ def create_app():
     # unhealthy), so the root is the same handler rather than a 404 waiting to cause a restart.
     @app.get("/")
     def health():
-        return {"status": "ok" if PREDICT else "no_model", "error": LOAD_ERROR,
-                "faceDetector": DETECTOR is not None,
+        return {"status": "ok" if (PREDICT or NPR_PREDICT) else "no_model", "error": LOAD_ERROR,
+                "faceDetector": DETECTOR is not None, "npr": NPR_META,
+                "fusionWeights": FUSION_WEIGHTS,
                 "thresholds": {"fakeAbove": FAKE_ABOVE, "realBelow": REAL_BELOW}, **META}
 
     # Deliberately `def`, not `async def`: inference is CPU-bound and would otherwise block
@@ -457,7 +578,7 @@ def create_app():
     # restarts the container mid-request. FastAPI runs sync endpoints in a threadpool.
     @app.post("/predict")
     def predict_image(file: UploadFile = File(...)):
-        if PREDICT is None:
+        if PREDICT is None and NPR_PREDICT is None:
             raise HTTPException(status_code=503, detail=f"No model loaded: {LOAD_ERROR}")
 
         contents = file.file.read()
@@ -515,6 +636,30 @@ def selfcheck():
 
     assert fake_index(["Realism", "Deepfake"]) == 1
     assert fake_index(["Fake", "Real"]) == 0
+
+    # Fusion: only present signals vote, and a missing one must not pull the mean toward 50.
+    w = {"face": 0.5, "npr": 0.5, "frequency": 0.0}
+    assert fuse({"face": 80.0, "npr": 20.0}, w)[0] == 50.0
+    assert fuse({"face": 90.0, "npr": None}, w)[0] == 90.0, "absent signal must not dilute"
+    assert fuse({"face": None, "npr": 100.0}, w)[0] == 100.0
+    assert fuse({"face": 60.0, "npr": 40.0, "frequency": 99.0}, w)[0] == 50.0, "zero weight = no vote"
+    assert "frequency" not in fuse({"face": 60.0, "frequency": 99.0}, w)[1], "0-weight must not read as a voter"
+    assert fuse({"face": None, "npr": None}, w) == (None, {})
+    assert fuse({"frequency": 99.0}, w) == (None, {}), "only zero-weighted signals = no verdict"
+    # Weights are relative, not absolute: doubling both changes nothing.
+    assert fuse({"face": 80.0, "npr": 20.0}, {"face": 1.0, "npr": 1.0})[0] == 50.0
+    assert fuse({"face": 80.0, "npr": 20.0}, {"face": 3.0, "npr": 1.0})[0] == 65.0
+
+    from common.config import parse_weights
+
+    assert parse_weights("face=0.3,npr=0.7", w) == {"face": 0.3, "npr": 0.7, "frequency": 0.0}
+    assert parse_weights("", w) == w
+    for bad in ("bogus=1", "face=-1", "face=0,npr=0,frequency=0"):
+        try:
+            parse_weights(bad, w)
+            raise AssertionError(f"{bad!r} must be rejected, not silently accepted")
+        except ValueError:
+            pass
 
     # Occlusion saliency, with a stub model that only reacts to the top-left corner: the
     # overlay must appear there, and a model that ignores every patch must yield no heatmap

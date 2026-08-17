@@ -29,6 +29,14 @@ RUN python export_onnx.py
 ADD https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx \
     /build/models/face_detection_yunet.onnx
 
+# NPR (CVPR 2024) whole-image AI-generation detector — the official ProGAN-trained weights,
+# 5.8MB, which generalize to unseen generators. Without this, a fully generated face is only
+# ever judged by a face-swap model that was never trained to see one.
+COPY models ./models
+ADD https://github.com/chuangchuangtan/NPR-DeepfakeDetection/raw/main/model_epoch_last_3090.pth \
+    /build/models/npr_detector.pth
+RUN python export_onnx.py --npr && rm /build/models/npr_detector.pth
+
 # ---------------------------------------------------------------- stage 2: optional torch build (--target torch)
 FROM python:3.11-slim AS torch
 WORKDIR /app
