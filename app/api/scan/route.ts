@@ -119,13 +119,18 @@ export async function POST(req: NextRequest) {
       fileType === 'video' ? '/predict-video' : fileType === 'audio' ? '/predict-audio' : '/predict';
     const service = await callModelService(fileBlob, filename, endpoint);
     if (!service.ok) {
+      // "Not implemented" and "your file is unusable" are not the same thing as "the service
+      // is down", and collapsing all three into 503 tells the user the wrong story. Pass the
+      // service's own status through when it answered; 503 only when it did not.
+      const passThrough = [501, 415, 413];
+      const status = passThrough.includes(service.status ?? 0) ? service.status! : 503;
       return NextResponse.json(
         {
-          error: 'Analysis unavailable',
+          error: status === 501 ? 'Not available yet' : status === 503 ? 'Analysis unavailable' : 'File rejected',
           detail: service.detail,
-          unavailable: true,
+          unavailable: status === 503,
         },
-        { status: 503 }
+        { status }
       );
     }
 

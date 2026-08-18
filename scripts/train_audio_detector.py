@@ -28,8 +28,8 @@ from torchvision import datasets, transforms, models
 # Add scripts directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.common.calibration import fit_temperature
-from scripts.common.xai import generate_gradcam
+from common.calibration import fit_temperature
+from common.xai import gradcam_overlay
 
 MODEL_SAVE_PATH = "models/audio_deepfake_detector.pth"
 
@@ -204,7 +204,17 @@ def main():
     try:
         sample_input, sample_label = val_ds[0]
         xai_out = os.path.join(args.out_dir, "xai_explanation.jpg")
-        generate_gradcam(model, sample_input.unsqueeze(0).to(device), sample_label, xai_out)
+        overlay = gradcam_overlay(model, sample_input.unsqueeze(0).to(device), sample_label,
+                                  transforms.ToPILImage()(sample_input))
+        if overlay:
+            import base64
+
+            os.makedirs(os.path.dirname(xai_out) or ".", exist_ok=True)
+            with open(xai_out, "wb") as fh:
+                fh.write(base64.b64decode(overlay.split(",", 1)[1]))
+            print(f"Saved Grad-CAM sample -> {xai_out}")
+        else:
+            print("Grad-CAM unavailable for this model — skipped.")
     except Exception as e:
         print(f"⚠️ XAI export note: {e}")
 

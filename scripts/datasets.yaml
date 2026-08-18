@@ -3,8 +3,13 @@
 # Note: Most academic datasets require submitting an access form to the original authors.
 # Fill in your local path once access is granted.
 
+# Keys per entry: name, homepage, access, expected_layout, local_path.
+# `kind:` is optional and only used for auto-discovery:
+#   kind: faces      -> preprocess_faces.py picks up local_path via --dataset-config
+#   kind: ai_images  -> train_npr.py finds it when --data-dir is omitted
 datasets:
   manjilkarki:
+    kind: faces
     name: "Kaggle Manjilkarki Deepfake Benchmark"
     homepage: "https://www.kaggle.com/datasets/manjilkarki/deepfake-and-real-images"
     access: "Public Kaggle Download"
@@ -38,3 +43,12 @@ datasets:
     access: "GitHub / Google Drive Request"
     expected_layout: "real / fake"
     local_path: null
+
+  # Example of a real-vs-AI image set for NPR. Two folders, names containing "real"/"fake":
+  #   data/ai_images/real/*.jpg
+  #   data/ai_images/fake/*.jpg
+  # ai_images_example:
+  #   name: "Your real vs AI-generated image set"
+  #   kind: ai_images
+  #   expected_layout: "ImageFolder (real/, fake/)"
+  #   local_path: null

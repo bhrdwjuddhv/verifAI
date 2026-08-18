@@ -47,7 +47,8 @@ export interface VideoSummary {
 
 export type ModelServiceResponse =
   | { ok: true; result: ModelServiceResult }
-  | { ok: false; detail: string };
+  /** `status` is the service's own HTTP status when it answered, absent when unreachable. */
+  | { ok: false; detail: string; status?: number };
 
 /**
  * Single door to the model service, for the public and admin routes alike.
@@ -86,7 +87,11 @@ export async function callModelService(
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({ detail: res.statusText }));
-      return { ok: false, detail: body.detail || `Model service returned HTTP ${res.status}.` };
+      return {
+        ok: false,
+        detail: body.detail || `Model service returned HTTP ${res.status}.`,
+        status: res.status,
+      };
     }
 
     const result = (await res.json()) as ModelServiceResult;
