@@ -37,13 +37,47 @@ export default function ModelCardPage() {
 
         <h1 className="text-3xl sm:text-4xl font-bold mt-4">Model Card</h1>
         <p className="text-sm text-ink-300 mt-3 leading-relaxed font-normal">
-          VerifAI runs one image classifier over the largest detected face. This page says what that
-          model is, what it was trained on, and what is not yet known about it. Where a number has
-          not been measured on this pipeline, it says so instead of guessing.
+          VerifAI runs two image detectors that answer different questions, and combines them into
+          one score. This page says what each model is, what it was trained on, and what is not yet
+          known about it. Where a number has not been measured on this pipeline, it says so instead
+          of guessing.
         </p>
 
         <section className="mt-10">
-          <h2 className="text-lg font-semibold mb-2">Active model</h2>
+          <h2 className="text-lg font-semibold mb-2">Detectors</h2>
+          <dl>
+            <Row label="1. Face classifier">
+              Answers “was this face swapped or manipulated”. Runs on the largest detected face,
+              cropped with a 35% margin. Abstains — casts no vote — when no face is found.
+            </Row>
+            <Row label="2. NPR (whole image)">
+              <span className="font-mono text-brand-blue-300">NPR</span>, Tan et al., CVPR 2024,
+              ported from the official repo. Answers “did a generator’s decoder make these pixels”
+              by reading the up-sampling artifact, so it catches fully synthetic images the face
+              classifier is blind to — including generated faces. Needs no face. Weights are the
+              authors’ ProGAN-trained checkpoint unless you train your own.
+            </Row>
+            <Row label="3. Voice model">
+              Mel-spectrogram → classifier, for audio uploads. <strong>Not trained yet</strong>: the
+              route returns 501 with the reason until <span className="font-mono">models/audio_detector.onnx</span>{' '}
+              exists. See <span className="font-mono">youhavetodo.md</span>.
+            </Row>
+            <Row label="How they combine">
+              A weighted mean over whichever detectors actually ran (
+              <span className="font-mono">FUSION_WEIGHTS</span>, default face 0.5 / NPR 0.5), then
+              the verdict bands. Every per-detector score stays visible in the report, so a
+              disagreement is legible rather than averaged away.
+            </Row>
+            <Row label="Supporting signals">
+              High-frequency FFT energy, video frame-to-frame variance, and C2PA/EXIF presence are
+              measured and displayed but carry <strong>no weight</strong> in the verdict — none of
+              them has an established direction on this data.
+            </Row>
+          </dl>
+        </section>
+
+        <section className="mt-10">
+          <h2 className="text-lg font-semibold mb-2">Model files</h2>
           <dl>
             <Row label="Default">
               <span className="font-mono text-brand-blue-300">
@@ -69,8 +103,9 @@ export default function ModelCardPage() {
               report panel shows it under “Model used”.
             </Row>
             <Row label="Input">
-              One image. The largest detected face is cropped with a 35% margin (MTCNN) and resized.
-              If no face is found, the verdict is <em>Uncertain</em> — the model is not applied.
+              One image, one short video clip, or one voice clip. Video is sampled (default 16
+              frames, evenly spaced), each frame scored by the image detectors, and the results
+              averaged. If no face is found, the face classifier abstains and NPR decides.
             </Row>
           </dl>
         </section>
@@ -99,8 +134,18 @@ export default function ModelCardPage() {
         <section className="mt-10">
           <h2 className="text-lg font-semibold mb-2">Measured performance</h2>
           <dl>
-            <Row label="Cross-dataset balanced accuracy">
+            <Row label="Face classifier, cross-dataset">
               <TBD how="python scripts/train_deepfake_detector.py --eval-only --eval-dir <unseen dataset>" />
+            </Row>
+            <Row label="NPR, cross-generator">
+              <TBD how="python scripts/train_npr.py --eval-only --eval-dir <unseen generators>" />
+            </Row>
+            <Row label="Fused, on a labelled set">
+              <TBD how="python scripts/tune_fusion.py --data-dir <labelled set> — also picks the weights" />
+            </Row>
+            <Row label="Voice model">
+              <span className="font-mono text-amber-300">no model yet</span>
+              <span className="text-ink-400"> (the route reports 501 rather than guessing)</span>
             </Row>
             <Row label="Cross-dataset AUC">
               <TBD how="same command; reported next to the in-distribution number" />
@@ -126,8 +171,19 @@ export default function ModelCardPage() {
         <section className="mt-10">
           <h2 className="text-lg font-semibold mb-2">Limits</h2>
           <ul className="space-y-2 text-sm text-ink-300 font-normal leading-relaxed list-disc pl-5">
-            <li>Faces only. No face, no verdict.</li>
-            <li>Images only. Video, audio and lip-sync detection are not implemented.</li>
+            <li>
+              Images and short video. Voice has a route but no trained model; lip-sync detection is
+              not implemented at all.
+            </li>
+            <li>
+              Video re-encoding weakens NPR badly — measured here: an AI image scoring 100 as a
+              still scored 0 once re-encoded into an mp4. On video the face classifier does most of
+              the work.
+            </li>
+            <li>
+              NPR is trained on generators up to a point in time. A brand-new generator with a
+              different up-sampling scheme may not leave the artifact it looks for.
+            </li>
             <li>
               Generators move faster than detectors. A model trained on today’s face swaps degrades on
               tomorrow’s, and the drop does not announce itself.

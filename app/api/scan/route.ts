@@ -115,19 +115,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No file provided.' }, { status: 400 });
     }
 
-    if (fileType !== 'image') {
-      // TODO(Phase 4): video = sample frames -> per-frame model -> aggregate;
-      // audio = mel-spectrogram -> AASIST/RawNet2. Neither exists, so neither gets a verdict.
-      return NextResponse.json(
-        {
-          error: `${fileType === 'video' ? 'Video' : 'Audio'} analysis is not available yet.`,
-          detail: 'Only images are supported in this version. Nothing was analyzed.',
-        },
-        { status: 501 }
-      );
-    }
-
-    const service = await callModelService(fileBlob, filename);
+    const endpoint =
+      fileType === 'video' ? '/predict-video' : fileType === 'audio' ? '/predict-audio' : '/predict';
+    const service = await callModelService(fileBlob, filename, endpoint);
     if (!service.ok) {
       return NextResponse.json(
         {
@@ -144,6 +134,7 @@ export async function POST(req: NextRequest) {
     const metadata = readMetadataSignal(fileBuffer);
     const modelScore = model.signals.modelScore;
     const nprScore = model.signals.nprScore ?? null;
+    const audioScore = model.signals.audioScore ?? null;
     // The fused probability is what the verdict is based on; fall back to the single face
     // score only for an older service that predates fusion.
     const fused = model.fakeProbability ?? modelScore;
@@ -151,7 +142,11 @@ export async function POST(req: NextRequest) {
 
     // Every reason below is a restatement of something that was actually measured.
     const reasons: string[] = [];
-    if (model.faceDetected === true) {
+    if (audioScore !== null) {
+      reasons.push(
+        `Voice model: ${audioScore}% likely a synthetic or cloned voice, from the clip's mel-spectrogram.`
+      );
+    } else if (model.faceDetected === true) {
       reasons.push('A face was detected; the model ran on the cropped face region.');
     } else if (model.faceDetected === false) {
       reasons.push('No face was detected in this image.');
@@ -160,6 +155,8 @@ export async function POST(req: NextRequest) {
     }
     if (modelScore !== null) {
       reasons.push(`Face classifier: ${modelScore}% likely swapped or manipulated.`);
+    } else if (audioScore !== null) {
+      // Audio: the image detectors do not apply, and saying "did not vote" for each would be noise.
     } else {
       reasons.push('Face classifier did not apply to this image, so it did not vote.');
     }
@@ -177,6 +174,22 @@ export async function POST(req: NextRequest) {
       reasons.push(
         `Combined score: ${fused}% likely AI-generated or manipulated${blend ? ` (weights: ${blend})` : ''}. Thresholds: above 70 fake, below 30 real, in between uncertain.`
       );
+    }
+    if (model.video) {
+      const v = model.video;
+      reasons.push(
+        `Sampled ${v.frames} frames across ${v.durationSeconds}s; each frame was scored by the same detectors and the results averaged.`
+      );
+      if (v.maxFakeProbability !== null && v.maxFakeProbability !== undefined) {
+        reasons.push(
+          `Worst single frame: ${v.maxFakeProbability}% likely fake${v.peakFrameSeconds !== null && v.peakFrameSeconds !== undefined ? ` at ${v.peakFrameSeconds}s` : ''}. The verdict uses the average, not the worst frame.`
+        );
+      }
+      if (v.temporalVariance !== null && v.temporalVariance !== undefined) {
+        reasons.push(
+          `Frame-to-frame variance: ${v.temporalVariance}. Reported as a flicker hint only — it carries no weight in the verdict.`
+        );
+      }
     }
     if (model.signals.frequencyScore !== null) {
       reasons.push(
@@ -213,12 +226,20 @@ export async function POST(req: NextRequest) {
       signals: {
         modelScore,
         nprScore,
+        audioScore,
         frequencyScore: model.signals.frequencyScore,
         faceDetected: model.faceDetected,
       },
       metadata,
       modelSource: model.modelSource,
       fusion: model.fusion,
+      video: model.video && {
+        frames: model.video.frames,
+        durationSeconds: model.video.durationSeconds,
+        maxFakeProbability: model.video.maxFakeProbability,
+        temporalVariance: model.video.temporalVariance,
+        peakFrameSeconds: model.video.peakFrameSeconds,
+      },
       heatmap: model.heatmap ?? null,
       notes: model.notes,
       timestamp: new Date().toISOString(),

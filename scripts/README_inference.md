@@ -1,9 +1,17 @@
 # VerifAI model service
 
-FastAPI service that runs a real image deepfake classifier and returns an honest verdict.
-The Next.js app talks to it over `MODEL_SERVICE_URL`; it never runs a model itself.
+FastAPI service that runs the detectors and returns an honest verdict. The Next.js app talks to
+it over `MODEL_SERVICE_URL`; it never runs a model itself.
 
-**Images only.** Video and audio are Phase 4 — those uploads get a `415`, not a verdict.
+| Endpoint | Input | Detectors |
+|---|---|---|
+| `POST /predict` | one image | face classifier (on the crop) + NPR (whole image) + FFT, fused |
+| `POST /predict-video` | short clip | the same, per sampled frame, then averaged |
+| `POST /predict-audio` | voice clip | voice model — **501 until you train one** |
+| `GET /health` `GET /` | — | which models loaded, weights, thresholds |
+
+Each detector is optional. A missing one is reported as unavailable and the rest carry on; with
+none of them loaded the service returns 503 rather than a guess.
 
 ## Two builds
 
@@ -42,26 +50,41 @@ python scripts/inference_server.py               # serves on 0.0.0.0:8000
 | None of them loads | `/predict` returns **503**. It does not guess. |
 
 The fallback is a **face** deepfake classifier (ViT, 224px, labels `Realism`/`Deepfake`). If no
-face is found in the upload, the verdict is `uncertain` and the response says why — a face model
-on a landscape produces a number, not evidence.
+face is found it abstains, and NPR decides on its own — a face model on a landscape produces a
+number, not evidence. With neither available the verdict is `uncertain` and the response says why.
+
+NPR loads separately from `NPR_MODEL_PATH`, and the voice model from `AUDIO_MODEL_PATH`.
 
 ## Response
 
 ```json
 {
   "verdict": "real | fake | uncertain",
-  "confidence": 88,
-  "modelSource": "hf_fallback:prithivMLmods/Deep-Fake-Detector-v2-Model",
+  "confidence": 81,
+  "fakeProbability": 81,
+  "modelSource": "onnx:hf_fallback:…+int8 + onnx:npr:…+int8",
+  "detectors": { "face": "onnx:…", "npr": "onnx:npr:…" },
   "faceDetected": true,
-  "signals": { "modelScore": 88, "frequencyScore": 14 },
+  "signals": { "modelScore": 81, "nprScore": 100, "frequencyScore": 1 },
+  "fusion": { "weights": {"face": 0.5, "npr": 0.5, "frequency": 0.0},
+              "used":    {"face": 0.5, "npr": 0.5} },
+  "heatmap": "data:image/png;base64,…",
   "notes": ["confidence is uncalibrated — treat it as a ranking, not a probability"]
 }
 ```
 
-- `modelScore` — P(fake) in percent, from the model. Bands: `>70` fake, `<30` real, else uncertain.
+Video adds a `video` block (frames, duration, max frame score, peak timestamp, temporal variance,
+per-frame table); audio replaces the image signals with `audioScore`.
+
+- `fakeProbability` — the fused number the verdict is based on. Bands: `>70` fake, `<30` real,
+  else uncertain.
+- `modelScore` — face classifier P(fake). `null` when it abstained (no face).
+- `nprScore` — NPR whole-image P(generated). `null` when the model is absent.
 - `frequencyScore` — share of FFT energy above half-Nyquist. A **descriptive statistic, not a
-  probability**, reported alongside the verdict and never fused into it. A sharp camera photo
+  probability**: weight 0 by default, so it is reported and never fused. A sharp camera photo
   scores high too.
+- `fusion.used` — exactly which detectors voted, and with what weight. A detector that did not
+  run does not appear, and its absence does not drag the mean toward 50.
 - `confidence` — probability of the reported verdict. Calibrated only when the checkpoint carries a
   fitted temperature (`calibrated: true` on `/health`); the HF fallback is uncalibrated.
 - `notes` — everything that qualifies the result. Show them.
@@ -76,6 +99,10 @@ on a landscape produces a number, not evidence.
 | `VERIFAI_MODEL` | `models/deepfake_detector.pth` | checkpoint path (shared with the trainer) |
 | `VERIFAI_HF_MODEL` | `prithivMLmods/Deep-Fake-Detector-v2-Model` | fallback classifier |
 | `VERIFAI_HF_EXPECTS_FACE` | `1` | set `0` if you swap in a whole-image AI detector |
+| `NPR_MODEL_PATH` | `models/npr_detector.onnx` | NPR whole-image AI-generation detector |
+| `AUDIO_MODEL_PATH` | `models/audio_detector.onnx` | voice model; absent = `/predict-audio` 501s |
+| `FUSION_WEIGHTS` | `face=0.5,npr=0.5,frequency=0.0` | how the detectors combine |
+| `VIDEO_FRAME_CAP` / `VIDEO_MAX_SECONDS` | `16` / `60` | frames sampled per clip, length ceiling |
 | `VERIFAI_FAKE_ABOVE` / `VERIFAI_REAL_BELOW` | `70` / `30` | verdict bands |
 | `VERIFAI_FACE_MARGIN` | `0.35` | crop margin; match the training manifest |
 | `VERIFAI_CORS_ORIGINS` | `*` | comma-separated origins |
@@ -129,9 +156,27 @@ timed out, and the platform restarted the container mid-request.
 
 Then set `MODEL_SERVICE_URL` in the Next.js app to the deployed URL (no trailing slash).
 
+## Adding detectors
+
+```bash
+# NPR: official ProGAN weights (no training needed), or train your own first
+curl -L -o models/npr_detector.pth \
+  https://github.com/chuangchuangtan/NPR-DeepfakeDetection/raw/main/model_epoch_last_3090.pth
+python scripts/export_onnx.py --npr        # -> models/npr_detector.onnx (1.5MB int8)
+
+# voice: train, then export
+python scripts/train_audio_detector.py --data-dir data/audio_spectrograms
+python scripts/export_onnx.py --audio      # -> models/audio_detector.onnx
+```
+
+The Docker build does the NPR step for you. Every export verifies itself against the torch model
+and fails the build on disagreement.
+
 ## Limits — read before trusting a number
 
-- Trained/evaluated on face datasets. Non-face images get `uncertain`, by design.
+- The face classifier only knows face swaps; NPR is what catches fully generated images. With
+  NPR absent, a StyleGAN portrait is judged by a model that was never trained to see one.
+- Video re-encoding weakens NPR: measured, an AI still scoring 100 scored 0 inside an mp4.
 - The HF fallback's accuracy on your data is **unmeasured**. Its card claims a number for its own
   test split; that is not a cross-dataset result and this repo does not repeat it.
 - Cross-dataset accuracy for our own checkpoint: **TBD — pending evaluation**

@@ -12,13 +12,37 @@ export interface ModelServiceResult {
     modelScore: number | null;
     /** NPR whole-image AI-generation detector, P(fake) percent. */
     nprScore?: number | null;
+    /** Voice-clone detector, P(fake) percent. Audio uploads only. */
+    audioScore?: number | null;
     frequencyScore: number | null;
   };
   /** Which detectors were loaded, and the weights that combined them. */
   detectors?: { face: string | null; npr: string | null };
   fusion?: { weights: Record<string, number>; used: Record<string, number> };
+  /** Present only for video: the per-frame breakdown behind the aggregate. */
+  video?: VideoSummary;
   notes: string[];
   heatmap?: string | null;
+}
+
+export interface VideoFrameScore {
+  t: number;
+  face: number | null;
+  npr: number | null;
+  frequency: number | null;
+  faceDetected: boolean | null;
+  fused: number | null;
+}
+
+export interface VideoSummary {
+  frames: number;
+  durationSeconds: number;
+  meanFakeProbability?: number | null;
+  maxFakeProbability?: number | null;
+  /** Spread of the per-frame scores. Reported as a flicker hint, not fused into the verdict. */
+  temporalVariance?: number | null;
+  peakFrameSeconds?: number | null;
+  perFrame: VideoFrameScore[];
 }
 
 export type ModelServiceResponse =
@@ -31,13 +55,17 @@ export type ModelServiceResponse =
  * There is no fallback path on purpose. When this fails the caller reports that analysis
  * is unavailable — a guessed verdict is worse than no verdict.
  */
-export async function callModelService(file: Blob, filename: string): Promise<ModelServiceResponse> {
+export async function callModelService(
+  file: Blob,
+  filename: string,
+  path: '/predict' | '/predict-video' | '/predict-audio' = '/predict'
+): Promise<ModelServiceResponse> {
   const base = process.env.MODEL_SERVICE_URL?.replace(/\/$/, '');
   if (!base) {
     return { ok: false, detail: 'MODEL_SERVICE_URL is not set — no model service is configured.' };
   }
 
-  const endpoint = `${base}/predict`;
+  const endpoint = `${base}${path}`;
   try {
     const form = new FormData();
     form.append('file', file, filename);

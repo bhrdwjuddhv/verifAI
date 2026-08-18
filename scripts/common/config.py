@@ -51,3 +51,14 @@ def parse_weights(spec, defaults):
 # scripts/tune_fusion.py has measured that it helps.
 FUSION_DEFAULTS = {"face": 0.5, "npr": 0.5, "frequency": 0.0}
 FUSION_WEIGHTS = parse_weights(os.environ.get("FUSION_WEIGHTS", ""), FUSION_DEFAULTS)
+
+# Video: sampled frames, not every frame. 16 frames of two detectors is already ~30s of CPU
+# on a free instance; decoding a 60s clip in full would be minutes.
+VIDEO_FRAME_CAP = int(os.environ.get("VIDEO_FRAME_CAP", "16"))
+VIDEO_MAX_SECONDS = float(os.environ.get("VIDEO_MAX_SECONDS", "60"))
+
+# Voice. Absent by default; the route says so rather than guessing. Train with
+# train_audio_detector.py, export with `export_onnx.py --audio`, drop the .onnx in.
+AUDIO_CHECKPOINT = os.environ.get("VERIFAI_AUDIO_CHECKPOINT",
+                                  os.path.join("models", "audio_deepfake_detector.pth"))
+AUDIO_MODEL_PATH = os.environ.get("AUDIO_MODEL_PATH", os.path.join("models", "audio_detector.onnx"))

@@ -100,7 +100,7 @@ export const ScanDemo: React.FC<ScanDemoProps> = ({ className }) => {
           </span>
         </div>
         <span className="text-xs font-mono text-brand-blue-300 bg-brand-blue-500/10 px-3 py-1 rounded-full border border-brand-blue-500/20">
-          Images only • Video &amp; audio not yet supported
+          Images, short video &amp; voice
         </span>
       </div>
 
@@ -142,7 +142,7 @@ export const ScanDemo: React.FC<ScanDemoProps> = ({ className }) => {
                 {scanStatus === 'uploading' ? 'Uploading...' : 'Running the detector...'}
               </h4>
               <p className="text-xs text-ink-400">
-                Detecting and cropping the face, then scoring it with the deepfake classifier.
+                Face-swap classifier on the cropped face, AI-generation detector on the whole frame; video is sampled frame by frame.
               </p>
             </div>
 

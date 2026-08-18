@@ -180,7 +180,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onStartScan, className }
           {/* The sample buttons that used to sit here shipped fixed scores with fabricated
               filenames — they only "worked" because detection was filename matching. */}
           <p className="text-[11px] text-ink-400 font-normal">
-            Upload a photo containing a face. Video and audio are not supported yet.
+            Upload a photo, a short video clip, or a voice clip.
           </p>
 
           <Button

@@ -69,7 +69,8 @@ COPY --from=builder /build/models ./models
 
 ENV PORT=8000 \
     VERIFAI_THREADS=2 \
-    VERIFAI_SALIENCY_GRID=5
+    VERIFAI_SALIENCY_GRID=5 \
+    VIDEO_FRAME_CAP=8
 EXPOSE 8000
 CMD uvicorn inference_server:create_app --factory --host 0.0.0.0 --port $PORT
 

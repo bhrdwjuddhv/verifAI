@@ -27,6 +27,8 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 from common.config import (
+    AUDIO_CHECKPOINT,
+    AUDIO_MODEL_PATH,
     HF_FALLBACK_EXPECTS_FACE,
     HF_FALLBACK_MODEL,
     MODEL_PATH,
@@ -71,12 +73,13 @@ def load_hf():
     return Logits(model), meta
 
 
-def load_checkpoint():
+def load_checkpoint(path=None, source="trained_checkpoint"):
+    """Our EfficientNet checkpoints — image or audio-spectrogram, same shape on disk."""
     import torch
     import torch.nn as nn
     from torchvision import models
 
-    ckpt = torch.load(MODEL_PATH, map_location="cpu", weights_only=True)
+    ckpt = torch.load(path or MODEL_PATH, map_location="cpu", weights_only=True)
     classes = ckpt["classes"]
     ctor = {"b0": models.efficientnet_b0, "b4": models.efficientnet_b4}[ckpt.get("arch", "b0")]
     model = ctor()
@@ -85,8 +88,9 @@ def load_checkpoint():
     model.eval()
 
     meta = {
-        "source": "trained_checkpoint",
+        "source": source,
         "labels": classes,
+        "modality": ckpt.get("modality", "image"),
         "imgSize": int(ckpt.get("img_size", 224)),
         # ImageNet normalization — what build_transforms() used during training.
         "mean": [0.485, 0.456, 0.406],
@@ -120,11 +124,13 @@ def main():
     ap.add_argument("--checkpoint", action="store_true", help=f"export {MODEL_PATH} instead of the HF model")
     ap.add_argument("--npr", action="store_true",
                     help=f"export the NPR whole-image detector ({NPR_CHECKPOINT} -> {NPR_MODEL_PATH})")
+    ap.add_argument("--audio", action="store_true",
+                    help=f"export the voice detector ({AUDIO_CHECKPOINT} -> {AUDIO_MODEL_PATH})")
     ap.add_argument("--no-quantize", action="store_true", help="keep fp32 (4x larger, bit-exact)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     if args.out is None:
-        args.out = NPR_MODEL_PATH if args.npr else ONNX_PATH
+        args.out = NPR_MODEL_PATH if args.npr else AUDIO_MODEL_PATH if args.audio else ONNX_PATH
 
     import torch
 
@@ -138,6 +144,17 @@ def main():
                 f"NPR-DeepfakeDetection/raw/main/model_epoch_last_3090.pth"
             )
         model, meta = load_npr_for_export(NPR_CHECKPOINT)
+    elif args.audio:
+        if not os.path.exists(AUDIO_CHECKPOINT):
+            sys.exit(
+                f"No audio checkpoint at {AUDIO_CHECKPOINT}.\n"
+                f"  Train one:  python scripts/preprocess_audio.py --src <clips> --out data/audio_spectrograms\n"
+                f"              python scripts/train_audio_detector.py --data-dir data/audio_spectrograms\n"
+                f"  See youhavetodo.md."
+            )
+        model, meta = load_checkpoint(AUDIO_CHECKPOINT, source="trained_audio_checkpoint")
+        if meta.get("modality") != "audio":
+            print(f"WARNING: {AUDIO_CHECKPOINT} is not marked modality=audio — check you exported the right file.")
     elif args.checkpoint:
         if not os.path.exists(MODEL_PATH):
             sys.exit(f"No checkpoint at {MODEL_PATH}.")

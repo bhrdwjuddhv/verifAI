@@ -72,6 +72,11 @@ export const ReportPanel: React.FC<ReportPanelProps> = ({ result, onReset }) => 
       score: result.signals.nprScore,
       color: '#A78BFA',
     },
+    result.signals.audioScore !== null && result.signals.audioScore !== undefined && {
+      name: 'Voice: P(clone)',
+      score: result.signals.audioScore,
+      color: '#34D399',
+    },
     result.signals.frequencyScore !== null && {
       name: 'High-Freq Energy',
       score: result.signals.frequencyScore,

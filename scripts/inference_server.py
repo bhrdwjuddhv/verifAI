@@ -1,7 +1,12 @@
-"""VerifAI image deepfake inference service.
+"""VerifAI deepfake inference service.
 
-Images only. Video and audio are Phase 4 — those requests are rejected rather than
-run through an image model and reported as a verdict.
+    POST /predict         one image  -> fused verdict + per-detector signals + heatmap
+    POST /predict-video   short clip -> sampled frames, aggregated, fused
+    POST /predict-audio   voice clip -> mel-spectrogram -> voice model (501 until one exists)
+
+Detectors, fused by FUSION_WEIGHTS over whichever ones actually ran:
+    face   face-swap classifier, on the cropped face
+    npr    NPR (CVPR 2024) whole-image AI-generation detector, on the full frame
 
     python scripts/inference_server.py              # serves on 0.0.0.0:$PORT (default 8000)
     python scripts/inference_server.py --selfcheck  # maths only: numpy + Pillow, no downloads
@@ -19,6 +24,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -30,8 +36,11 @@ from PIL import Image, UnidentifiedImageError
 
 # scripts/ is on sys.path because this file lives there.
 from common.config import (
+    AUDIO_MODEL_PATH,
     FAKE_ABOVE,
     FUSION_WEIGHTS,
+    VIDEO_FRAME_CAP,
+    VIDEO_MAX_SECONDS,
     HF_FALLBACK_EXPECTS_FACE,
     HF_FALLBACK_MODEL,
     MODEL_PATH,
@@ -191,13 +200,13 @@ def load_checkpoint_engine():
 
     fake_i = fake_index(classes)
 
-    def predict(img):
+    def predict(img, explain=None):
         t = to_tensor(img, size).unsqueeze(0).to(device)
         with torch.no_grad():
             batch = torch.cat([t, torch.flip(t, dims=[3])])  # flip TTA
             probs = torch.softmax(model(batch).float() / temperature, dim=1).mean(dim=0).tolist()
         heatmap = None
-        if GRADCAM:
+        if GRADCAM if explain is None else explain:
             heatmap = gradcam_overlay(model, t, fake_i, img.resize((size, size), Image.BILINEAR))
         return fake_probability(probs, classes), heatmap
 
@@ -212,7 +221,7 @@ def load_checkpoint_engine():
     return predict, meta
 
 
-def load_onnx_engine():
+def load_onnx_engine(model_path=None):
     """The lean build: ONNX Runtime, no torch, no transformers.
 
     torch plus a ViT-base measures ~1.2GB resident, which does not fit a 512MB instance. This
@@ -223,7 +232,8 @@ def load_onnx_engine():
     """
     import onnxruntime as ort
 
-    with open(os.path.splitext(ONNX_PATH)[0] + ".json") as fh:
+    model_path = model_path or ONNX_PATH
+    with open(os.path.splitext(model_path)[0] + ".json") as fh:
         meta_file = json.load(fh)
 
     labels = meta_file["labels"]
@@ -239,7 +249,7 @@ def load_onnx_engine():
     # resident ceiling, which is the entire point of this build.
     options.enable_cpu_mem_arena = False
     options.intra_op_num_threads = int(os.environ.get("VERIFAI_THREADS", "2"))
-    session = ort.InferenceSession(ONNX_PATH, sess_options=options, providers=["CPUExecutionProvider"])
+    session = ort.InferenceSession(model_path, sess_options=options, providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
     chunk = int(os.environ.get("VERIFAI_BATCH", "8"))
 
@@ -249,11 +259,11 @@ def load_onnx_engine():
         e = np.exp(logits - logits.max(axis=1, keepdims=True))
         return e / e.sum(axis=1, keepdims=True)
 
-    def predict(img):
+    def predict(img, explain=None):
         arr = to_array(img, size, mean, std)
         probs = run(np.concatenate([arr, arr[:, :, :, ::-1]]))  # flip TTA
         heatmap = None
-        if GRADCAM:
+        if GRADCAM if explain is None else explain:
             heatmap = occlusion_overlay(run, arr, fake_i, img.resize((size, size), Image.BILINEAR))
         return fake_probability(probs.mean(axis=0).tolist(), labels), heatmap
 
@@ -313,12 +323,12 @@ def load_hf_engine():
 
     fake_i = fake_index(labels)
 
-    def predict(img):
+    def predict(img, explain=None):
         inputs = processor(images=img, return_tensors="pt").to(device)
         with torch.no_grad():
             probs = torch.softmax(model(**inputs).logits[0].float(), dim=0).tolist()
         heatmap = None
-        if GRADCAM:
+        if GRADCAM if explain is None else explain:
             pixel_values = inputs["pixel_values"]
             side = pixel_values.shape[-1]
             heatmap = gradcam_overlay(model, pixel_values, fake_i, img.resize((side, side), Image.BILINEAR))
@@ -436,10 +446,13 @@ def load_face_detector():
 
 PREDICT, META, LOAD_ERROR, DETECTOR = None, {}, None, None
 NPR_PREDICT, NPR_META = None, {"available": False, "reason": "not loaded"}
+AUDIO_PREDICT, AUDIO_META = None, {"available": False, "reason": "not loaded"}
 
 
 def startup():
-    global PREDICT, META, LOAD_ERROR, DETECTOR, NPR_PREDICT, NPR_META
+    global PREDICT, META, LOAD_ERROR, DETECTOR, NPR_PREDICT, NPR_META, AUDIO_PREDICT, AUDIO_META
+    AUDIO_PREDICT, AUDIO_META = load_audio_engine()
+    print(f"[AUDIO] {AUDIO_META.get('modelSource') if AUDIO_PREDICT else 'unavailable — ' + AUDIO_META['reason']}")
     NPR_PREDICT, NPR_META = load_npr_engine()
     print(f"[NPR] {NPR_META.get('modelSource') if NPR_PREDICT else 'unavailable — ' + NPR_META['reason']}")
     try:
@@ -547,6 +560,232 @@ def analyze(image):
     }
 
 
+def frame_signals(image, explain=False):
+    """Per-frame detector scores. Shared by the image and video paths so they cannot drift."""
+    from preprocess_faces import crop_face
+
+    crop, face_detected = None, None
+    if DETECTOR is not None:
+        try:
+            crop = crop_face(DETECTOR, image, FACE_MARGIN)
+            face_detected = crop is not None
+        except Exception:
+            face_detected = None
+
+    face_pct, heatmap = None, None
+    if PREDICT is not None and not (META["expectsFace"] and face_detected is False):
+        target = crop if (META["expectsFace"] and crop is not None) else image
+        fake_prob, heatmap = PREDICT(target, explain=explain)
+        face_pct = float(round(100.0 * fake_prob))
+
+    npr_pct = None
+    if NPR_PREDICT is not None:
+        npr_pct = float(round(100.0 * NPR_PREDICT(image)))
+
+    return {
+        "face": face_pct,
+        "npr": npr_pct,
+        "frequency": float(round(frequency_score(image))),
+        "faceDetected": face_detected,
+        "heatmap": heatmap,
+    }
+
+
+def sample_frames(path, cap=None):
+    """Evenly spaced frames as PIL images, with their timestamps.
+
+    Even spacing, not the first N: a manipulated clip is usually manipulated in the middle,
+    and the first second of anything is often a title card.
+    """
+    import cv2
+
+    want = cap or VIDEO_FRAME_CAP
+    capture = cv2.VideoCapture(path)
+    if not capture.isOpened():
+        raise ValueError("could not decode this video")
+
+    total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    fps = float(capture.get(cv2.CAP_PROP_FPS) or 0) or 25.0
+    duration = total / fps if total else 0.0
+    if duration > VIDEO_MAX_SECONDS:
+        capture.release()
+        raise ValueError(f"video is {duration:.0f}s long; the limit is {VIDEO_MAX_SECONDS:.0f}s")
+
+    frames = []
+    if total > 0:
+        indices = sorted({int(i * (total - 1) / max(1, want - 1)) for i in range(min(want, total))})
+        for idx in indices:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = capture.read()
+            if ok:
+                frames.append((idx / fps, Image.fromarray(frame[:, :, ::-1])))
+    else:
+        # Streams with no frame count: read sequentially until the cap.
+        while len(frames) < want:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            frames.append((len(frames) / fps, Image.fromarray(frame[:, :, ::-1])))
+    capture.release()
+
+    if not frames:
+        raise ValueError("no readable frames in this video")
+    return frames, duration
+
+
+def mean_of(values):
+    present = [v for v in values if v is not None]
+    return float(round(sum(present) / len(present))) if present else None
+
+
+def analyze_video(path):
+    """Sample frames, score each with the image detectors, aggregate, fuse.
+
+    No new model: a deepfaked video is a sequence of deepfaked images. The one video-specific
+    number is temporal variance — a swapped face flickers between frames in a way a filmed one
+    does not — and it is reported, not fused, because nobody has calibrated it here.
+    """
+    frames, duration = sample_frames(path)
+    per_frame = []
+    for timestamp, image in frames:
+        sig = frame_signals(image, explain=False)
+        fused_frame, _ = fuse({k: sig[k] for k in ("face", "npr", "frequency")})
+        per_frame.append({
+            "t": round(timestamp, 2),
+            "face": sig["face"],
+            "npr": sig["npr"],
+            "frequency": sig["frequency"],
+            "faceDetected": sig["faceDetected"],
+            "fused": fused_frame,
+        })
+
+    means = {k: mean_of([f[k] for f in per_frame]) for k in ("face", "npr", "frequency")}
+    fused, used = fuse(means)
+    fused_frames = [f["fused"] for f in per_frame if f["fused"] is not None]
+    faces_found = sum(1 for f in per_frame if f["faceDetected"])
+
+    detectors = {"face": META.get("modelSource") if PREDICT else None,
+                 "npr": NPR_META.get("modelSource") if NPR_PREDICT else None}
+    notes = [f"sampled {len(per_frame)} frames across {duration:.1f}s"]
+    if faces_found == 0:
+        notes.append("no face found in any sampled frame — the face classifier did not vote")
+    elif faces_found < len(per_frame):
+        notes.append(f"a face was found in {faces_found} of {len(per_frame)} sampled frames")
+
+    video = {"frames": len(per_frame), "durationSeconds": round(duration, 2),
+             "perFrame": per_frame}
+
+    if fused is None:
+        return {
+            "verdict": "uncertain", "confidence": 0, "fakeProbability": None,
+            "modelSource": NPR_META.get("modelSource") or META.get("modelSource"),
+            "detectors": detectors,
+            "faceDetected": faces_found > 0,
+            "signals": {"modelScore": means["face"], "nprScore": means["npr"],
+                        "frequencyScore": means["frequency"]},
+            "fusion": {"weights": FUSION_WEIGHTS, "used": {}},
+            "video": video,
+            "heatmap": None,
+            "notes": notes + ["no detector applied to these frames, so there is no verdict"],
+        }
+
+    # Flicker: spread of the per-frame verdicts. A partly manipulated clip is inconsistent —
+    # worth a human's attention, but reported, never fused.
+    variance = None
+    if len(fused_frames) > 1:
+        mean_f = sum(fused_frames) / len(fused_frames)
+        variance = round(sum((v - mean_f) ** 2 for v in fused_frames) / len(fused_frames), 1)
+
+    verdict, confidence = verdict_for(fused)
+    peak = max(per_frame, key=lambda f: f["fused"] if f["fused"] is not None else -1)
+    if variance is not None and variance > 400:
+        notes.append(f"per-frame scores vary a lot (variance {variance:.0f}) — the clip may be "
+                     "partly manipulated, or the frames may simply differ in quality")
+    if not META.get("calibrated", False):
+        notes.append("confidence is uncalibrated — treat it as a ranking, not a probability")
+    notes.append("no heatmap for video: it would be one per frame, and per-frame explanation "
+                 "costs more than the verdict itself")
+    # Measured, not assumed: an AI image NPR scored 100 as a still scored 0 after being
+    # re-encoded into an mp4. Every video is re-encoded, so this caveat is permanent.
+    notes.append("video re-encoding weakens the up-sampling artifact the AI-generation "
+                 "detector reads — treat its score on video as weaker evidence than on a still")
+
+    video.update({
+        "meanFakeProbability": int(fused),
+        "maxFakeProbability": int(max(fused_frames)) if fused_frames else None,
+        "temporalVariance": variance,
+        "peakFrameSeconds": peak["t"] if fused_frames else None,
+    })
+
+    return {
+        "verdict": verdict,
+        "confidence": round(confidence),
+        "fakeProbability": int(fused),
+        "modelSource": " + ".join(x for x in (
+            META.get("modelSource") if means["face"] is not None else None,
+            NPR_META.get("modelSource") if means["npr"] is not None else None) if x),
+        "detectors": detectors,
+        "faceDetected": faces_found > 0,
+        "signals": {"modelScore": means["face"], "nprScore": means["npr"],
+                    "frequencyScore": means["frequency"]},
+        "fusion": {"weights": FUSION_WEIGHTS, "used": used},
+        "video": video,
+        "heatmap": None,
+        "notes": notes,
+    }
+
+
+def load_audio_engine():
+    """Voice-clone detector. Same ONNX classifier machinery, fed a mel-spectrogram."""
+    if not os.path.exists(AUDIO_MODEL_PATH):
+        return None, {"available": False, "reason": f"no audio model at {AUDIO_MODEL_PATH}"}
+    try:
+        predict, meta = load_onnx_engine(AUDIO_MODEL_PATH)
+        meta["available"] = True
+        return predict, meta
+    except Exception as e:
+        return None, {"available": False, "reason": f"{type(e).__name__}: {e}"}
+
+
+def analyze_audio(path):
+    """Audio -> mel-spectrogram -> the voice model. Same bands, same honesty as images.
+
+    The spectrogram comes from preprocess_audio.generate_spectrogram_image — the exact
+    function the training set was built with. Reimplementing the mel maths here would be a
+    second chance to get n_mels, hop length or the dB reference subtly different, and the
+    model would degrade with nothing in the logs to explain it.
+    """
+    from preprocess_audio import generate_spectrogram_image
+
+    image = generate_spectrogram_image(path, AUDIO_META.get("imgSize", 224))
+    if image is None:
+        raise ValueError("could not decode this audio, or it was empty")
+
+    fake_prob, _ = AUDIO_PREDICT(image, explain=False)
+    fake_pct = float(round(100.0 * fake_prob))
+    verdict, confidence = verdict_for(fake_pct)
+
+    notes = ["verdict is from the voice model alone — the image detectors do not apply to audio"]
+    if not AUDIO_META.get("calibrated", False):
+        notes.append("confidence is uncalibrated — treat it as a ranking, not a probability")
+    if AUDIO_META.get("quantized"):
+        notes.append("int8-quantized build; scores can differ from full precision by a point or two")
+
+    return {
+        "verdict": verdict,
+        "confidence": round(confidence),
+        "fakeProbability": int(fake_pct),
+        "modelSource": AUDIO_META["modelSource"],
+        "detectors": {"face": None, "npr": None, "audio": AUDIO_META["modelSource"]},
+        "faceDetected": None,
+        "signals": {"modelScore": None, "nprScore": None, "frequencyScore": None,
+                    "audioScore": int(fake_pct)},
+        "fusion": {"weights": {"audio": 1.0}, "used": {"audio": 1.0}},
+        "heatmap": None,
+        "notes": notes,
+    }
+
+
 def create_app():
     """App factory. Deploy with: uvicorn inference_server:create_app --factory --host 0.0.0.0"""
     from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -569,7 +808,7 @@ def create_app():
     @app.get("/")
     def health():
         return {"status": "ok" if (PREDICT or NPR_PREDICT) else "no_model", "error": LOAD_ERROR,
-                "faceDetector": DETECTOR is not None, "npr": NPR_META,
+                "faceDetector": DETECTOR is not None, "npr": NPR_META, "audio": AUDIO_META,
                 "fusionWeights": FUSION_WEIGHTS,
                 "thresholds": {"fakeAbove": FAKE_ABOVE, "realBelow": REAL_BELOW}, **META}
 
@@ -594,6 +833,63 @@ def create_app():
             return analyze(image)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+    @app.post("/predict-video")
+    def predict_video(file: UploadFile = File(...)):
+        if PREDICT is None and NPR_PREDICT is None:
+            raise HTTPException(status_code=503, detail=f"No model loaded: {LOAD_ERROR}")
+
+        contents = file.file.read()
+        if len(contents) > MAX_BYTES:
+            raise HTTPException(status_code=413, detail="File exceeds 50MB limit.")
+
+        # OpenCV decodes from a path, not a buffer. Deleted in the finally, always.
+        suffix = os.path.splitext(file.filename or "")[1][:8] or ".mp4"
+        fd, temp_path = tempfile.mkstemp(suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(contents)
+            return analyze_video(temp_path)
+        except ValueError as e:
+            # Undecodable, empty or over the length limit — the caller's problem, stated plainly.
+            raise HTTPException(status_code=415, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+    @app.post("/predict-audio")
+    def predict_audio(file: UploadFile = File(...)):
+        if AUDIO_PREDICT is None:
+            # No model means no verdict. Saying so is the whole point.
+            raise HTTPException(
+                status_code=501,
+                detail=f"Voice detection is not available yet ({AUDIO_META.get('reason')}). "
+                       f"Train a model and drop the ONNX in — see youhavetodo.md.",
+            )
+
+        contents = file.file.read()
+        if len(contents) > MAX_BYTES:
+            raise HTTPException(status_code=413, detail="File exceeds 50MB limit.")
+
+        suffix = os.path.splitext(file.filename or "")[1][:8] or ".wav"
+        fd, temp_path = tempfile.mkstemp(suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(contents)
+            return analyze_audio(temp_path)
+        except ValueError as e:
+            raise HTTPException(status_code=415, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
     return app
 
@@ -677,6 +973,19 @@ def selfcheck():
     flat = occlusion_overlay(lambda b: np.tile([[0.5, 0.5]], (len(b), 1)).astype(np.float32),
                              probe, 1, Image.new("RGB", (32, 32)), grid=4)
     assert flat is None, "a model whose score never moves has nothing to explain"
+
+    # Video aggregation: means ignore absent signals, variance measures flicker.
+    assert mean_of([10.0, 20.0, None]) == 15.0, "absent frames must not count as zero"
+    assert mean_of([None, None]) is None
+    assert mean_of([]) is None
+
+    frames_steady = [50.0] * 8
+    frames_flicker = [0.0, 100.0] * 4
+    def variance(values):
+        m = sum(values) / len(values)
+        return sum((v - m) ** 2 for v in values) / len(values)
+    assert variance(frames_steady) == 0.0
+    assert variance(frames_flicker) == 2500.0, "alternating frames must read as high variance"
 
     from common.xai import selfcheck as xai_selfcheck
 

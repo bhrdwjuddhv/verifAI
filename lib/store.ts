@@ -9,6 +9,8 @@ export interface ScanSignals {
   modelScore: number | null;
   /** NPR whole-image AI-generation detector, 0-100. Null when unavailable. */
   nprScore: number | null;
+  /** Voice-clone detector, 0-100. Audio uploads only. */
+  audioScore?: number | null;
   /** Share of FFT energy above half-Nyquist, 0-100. Descriptive statistic, not a probability. */
   frequencyScore: number | null;
   faceDetected: boolean | null;
@@ -41,6 +43,14 @@ export interface ScanResult {
   modelSource: string;
   /** Weights that combined the signals into the verdict, and which ones voted. */
   fusion?: { weights: Record<string, number>; used: Record<string, number> };
+  /** Video only: how many frames were sampled and how they scored. */
+  video?: {
+    frames: number;
+    durationSeconds: number;
+    maxFakeProbability?: number | null;
+    temporalVariance?: number | null;
+    peakFrameSeconds?: number | null;
+  };
   /** Grad-CAM overlay as a data URL, when the active model supports it. */
   heatmap: string | null;
   /** Caveats from the model service. Display them. */

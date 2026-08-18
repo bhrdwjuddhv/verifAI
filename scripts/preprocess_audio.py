@@ -72,9 +72,11 @@ def generate_spectrogram_image(filepath: str, out_size: int = 224) -> Image.Imag
                 img = Image.fromarray(norm).convert("RGB")
                 return img.resize((out_size, out_size), Image.LANCZOS)
         except Exception:
-            # Synthetic spectrogram for unreadable audio stubs / smoke tests
-            arr = np.uint8(np.random.randint(0, 255, (out_size, out_size, 3)))
-            return Image.fromarray(arr)
+            # Undecodable. Returning a random-noise spectrogram here (as this used to) hands
+            # the model pure noise and gets back a confident verdict about nothing — and puts
+            # garbage rows in the training set. None means "no features", and every caller
+            # already treats that as "skip / 415".
+            return None
 
 
 def selfcheck():
@@ -85,9 +87,40 @@ def selfcheck():
     assert canonical_label("unknown_folder", {}) is None
     assert canonical_label("unknown_folder", {"unknown_folder": "Real"}) == "Real"
 
-    # Test synthetic image output
-    dummy_img = Image.new("RGB", (224, 224))
-    assert dummy_img.width == 224 and dummy_img.height == 224
+    # An undecodable file must produce NO features. This used to return a random-noise
+    # spectrogram, which the model then scored with total confidence — the single most
+    # dangerous line in the audio path.
+    import math
+    import struct
+    import tempfile
+    import wave
+
+    with tempfile.TemporaryDirectory() as tmp:
+        junk = os.path.join(tmp, "not_audio.wav")
+        with open(junk, "wb") as fh:
+            fh.write(b"this is not audio at all")
+        assert generate_spectrogram_image(junk) is None, "undecodable audio must return None"
+
+        empty = os.path.join(tmp, "empty.wav")
+        with wave.open(empty, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+        assert generate_spectrogram_image(empty) is None, "an empty clip has no features"
+
+        tone = os.path.join(tmp, "tone.wav")
+        with wave.open(tone, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(b"".join(
+                struct.pack("<h", int(9000 * math.sin(2 * math.pi * 440 * t / 16000)))
+                for t in range(16000)
+            ))
+        img = generate_spectrogram_image(tone, 224)
+        assert img is not None and img.size == (224, 224) and img.mode == "RGB", (
+            f"a real PCM wav must yield a 224x224 RGB spectrogram, got {img}")
+
     print("✅ audio preprocessing selfcheck passed")
 
 

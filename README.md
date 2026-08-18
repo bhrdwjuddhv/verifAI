@@ -2,7 +2,9 @@
 
 VerifAI is a deepfake verification app built with **Next.js 14 (App Router)**, **TypeScript**, **Tailwind CSS**, and **PyTorch**.
 
-**What the detector actually does:** it finds the largest face in an uploaded **image**, crops it, and scores it with a deepfake classifier, returning `real` / `fake` / `uncertain` with a confidence and a Grad-CAM heatmap. **Its limits:** faces only, images only (video and audio are not implemented), accuracy on unseen generators is **not yet measured**, and the default classifier's confidence is uncalibrated. A "real" verdict means the detector found nothing — not that the file is authentic. See [`/model-card`](app/model-card/page.tsx) and [`flow.md`](flow.md).
+**What the detector actually does:** for an **image** it runs two detectors — a face classifier on the cropped face (was this face swapped?) and NPR (CVPR 2024) on the whole frame (did a generator make these pixels?) — combines them by configurable weights, and returns `real` / `fake` / `uncertain` with a confidence, per-detector scores and a heatmap. **Video** is sampled frame by frame and averaged. **Voice** has a route but no trained model, so it returns 501 rather than a guess.
+
+**Its limits:** accuracy on unseen generators is **not yet measured** (`/model-card` says TBD, and stays that way until you run the evals in [`youhavetodo.md`](youhavetodo.md)); confidence is uncalibrated with the default third-party weights; video re-encoding weakens NPR badly; and a "real" verdict means the detectors found nothing — not that the file is authentic. See [`flow.md`](flow.md) for the routing.
 
 ---
 
@@ -14,7 +16,8 @@ VerifAI is a deepfake verification app built with **Next.js 14 (App Router)**, *
 | **3D Visuals** | Three.js, `@react-three/fiber` |
 | **State & Auth** | Zustand (`lib/store.ts`), Web Crypto HMAC-SHA256 JWT Signed Sessions |
 | **Backend API** | Next.js API Routes (`app/api/scan/route.ts`, `app/api/admin/*`) |
-| **ML Engine & Server** | PyTorch (EfficientNet-B0/B4, Spectrogram CNN) + FastAPI (`scripts/inference_server.py`) |
+| **ML Engine & Server** | FastAPI (`scripts/inference_server.py`); ONNX Runtime at runtime (torch-free, 205MB), PyTorch for training/export only |
+| **Detectors** | Face classifier (EfficientNet / ViT) + NPR (CVPR 2024) whole-image AI-generation detector + optional voice model |
 | **Explainability (XAI)** | Grad-CAM feature activation maps (`scripts/common/xai.py`) |
 
 ---
@@ -124,7 +127,18 @@ python scripts/preprocess_audio.py --selfcheck
 python scripts/train_audio_detector.py --selfcheck
 ```
 
-### 5. Measuring accuracy (nothing is claimed until this is run)
+### 5. Adding the NPR detector (big accuracy win, no training needed)
+
+```bash
+curl -L -o models/npr_detector.pth \
+  https://github.com/chuangchuangtan/NPR-DeepfakeDetection/raw/main/model_epoch_last_3090.pth
+python scripts/export_onnx.py --npr
+```
+
+The Docker build does this automatically. Without NPR, a fully generated face is judged only by a
+face-swap classifier that was never trained to recognise one.
+
+### 6. Measuring accuracy (nothing is claimed until this is run)
 
 ```bash
 python scripts/train_deepfake_detector.py --eval-only --eval-dir <dataset from another source>
