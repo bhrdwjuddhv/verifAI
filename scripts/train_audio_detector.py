@@ -1,12 +1,12 @@
-"""Audio Deepfake Spectrogram Detector Training Script.
+"""Audio deepfake detector: EfficientNet/MobileNet over mel-spectrogram images.
 
-Trains an EfficientNet/MobileNet CNN model on audio spectrogram datasets.
-Incorporates temperature scaling calibration, group-aware splitting,
-and Grad-CAM XAI explainability export.
+    python scripts/train_audio_detector.py --data-dir data/audio_spectrograms --epochs 15
+    python scripts/train_audio_detector.py --selfcheck
 
-Usage:
-  python scripts/train_audio_detector.py --data-dir data/audio_spectrograms
-  python scripts/train_audio_detector.py --selfcheck
+Spectrograms come from preprocess_audio.py, which names every file
+``{source_tag}__{folder}__{original_stem}.jpg`` — that prefix is what lets this script split
+by SOURCE rather than at random. Reading the same speaker, or the same corpus split, in both
+train and validation is how a voice detector reports 0.97 and then fails on real uploads.
 """
 
 import argparse
@@ -14,7 +14,6 @@ import json
 import os
 import random
 import sys
-import time
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -25,13 +24,13 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms, models
 
-# Add scripts directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.calibration import fit_temperature
+from common.config import AUDIO_CHECKPOINT as MODEL_SAVE_PATH
+from common.metrics import binary_auc
 from common.xai import gradcam_overlay
-
-MODEL_SAVE_PATH = "models/audio_deepfake_detector.pth"
+from train_deepfake_detector import split_indices
 
 BACKBONES = {
     "b0": (models.efficientnet_b0, models.EfficientNet_B0_Weights.DEFAULT, 224),
@@ -40,37 +39,67 @@ BACKBONES = {
 
 
 def build_audio_transforms(img_size: int):
+    """No horizontal flip.
+
+    A mel-spectrogram's x-axis is time: flipping it plays the audio backwards, which is not a
+    label-preserving augmentation — it is a clip that could never occur. The previous version
+    flipped, and worse, applied the *training* transform to the validation set too, so every
+    reported validation number carried random augmentation noise.
+    """
+    norm = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     train_tf = transforms.Compose([
         transforms.Resize((img_size, img_size)),
-        transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        norm,
+        # Time/frequency masking (SpecAugment-style): the standard, label-preserving
+        # augmentation for spectrograms — occlude a band, keep the meaning.
+        transforms.RandomErasing(p=0.5, scale=(0.02, 0.15), ratio=(0.3, 3.3)),
     ])
     val_tf = transforms.Compose([
         transforms.Resize((img_size, img_size)),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        norm,
     ])
     return train_tf, val_tf
 
 
-def binary_auc(scores, labels):
-    pairs = sorted(zip(scores, labels))
-    ranks, i = [0.0] * len(pairs), 0
-    while i < len(pairs):
-        j = i
-        while j + 1 < len(pairs) and pairs[j + 1][0] == pairs[i][0]:
-            j += 1
-        avg = (i + j) / 2.0 + 1.0
-        for k in range(i, j + 1):
-            ranks[k] = avg
-        i = j + 1
-    n_pos = sum(1 for _, l in pairs if l == 1)
-    n_neg = len(pairs) - n_pos
-    if n_pos == 0 or n_neg == 0:
-        return float("nan")
-    rank_sum = sum(r for r, (_, l) in zip(ranks, pairs) if l == 1)
-    return (rank_sum - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+def source_key(path):
+    """Group id from preprocess_audio's filename convention.
+
+    ``audio_raw__fake_cloned__for_train_fake_0001.jpg`` -> ``audio_raw|for_train``
+
+    The class folder is deliberately dropped: including it would make every group belong to
+    exactly one class, and a group-aware split would then hand an entire class to validation.
+    The stem's leading tokens are what actually identify the corpus and its split.
+    """
+    stem = os.path.splitext(os.path.basename(path))[0]
+    parts = stem.split("__")
+    tag = parts[0] if parts else ""
+    rest = parts[-1] if len(parts) > 1 else ""
+    tokens = [t for t in rest.split("_") if t and not t.isdigit()][:2]
+    return f"{tag}|{'_'.join(tokens)}" if tokens else tag
+
+
+def build_groups(paths, targets, n_classes):
+    """Source groups, but only if they can actually carry a split.
+
+    Returns (groups, reason). A group scheme that leaves any class with fewer than two groups
+    cannot produce a split that holds out a source without holding out a class, so it is
+    rejected and the caller falls back to a stratified split — with that fact printed, not
+    hidden.
+    """
+    groups = [source_key(p) for p in paths]
+    per_class = {c: set() for c in range(n_classes)}
+    for g, t in zip(groups, targets):
+        per_class[t].add(g)
+
+    distinct = sorted({g for g in groups})
+    if len(distinct) < 2 or any(len(v) < 2 for v in per_class.values()):
+        return None, (f"only {len(distinct)} source group(s) "
+                      f"({', '.join(distinct[:6])}) — not enough to split by source")
+
+    index = {g: i for i, g in enumerate(distinct)}
+    return [index[g] for g in groups], f"{len(distinct)} source groups: {', '.join(distinct[:8])}"
 
 
 @torch.no_grad()
@@ -108,20 +137,73 @@ def evaluate(model, loader, device, classes, real_idx):
     return logits, labels, metrics
 
 
+def build_model(arch, num_classes):
+    ctor, weights, _ = BACKBONES[arch]
+    model = ctor(weights=weights)
+    if isinstance(model.classifier, nn.Sequential):
+        in_feat = model.classifier[-1].in_features
+        model.classifier[-1] = nn.Linear(in_feat, num_classes)
+    else:
+        model.classifier = nn.Linear(model.classifier.in_features, num_classes)
+    return model
+
+
 def selfcheck():
-    """Assertions for audio training functions."""
+    """The maths that decides labels, splits and weighting — the parts that fail silently."""
     assert abs(binary_auc([0.1, 0.4, 0.35, 0.8], [0, 0, 1, 1]) - 0.75) < 1e-9
+
+    # Source keys must ignore the class folder, or every group belongs to one class.
+    assert source_key("audio_raw__fake_cloned__for_train_fake_0001.jpg") == "audio_raw|for_train"
+    assert source_key("audio_raw__real_speech__for_train_real_0002.jpg") == "audio_raw|for_train"
+    assert (source_key("audio_raw__real_speech__asvspoof_dev_x.jpg")
+            != source_key("audio_raw__real_speech__for_train_x.jpg"))
+
+    # A corpus present in both classes can carry a split; one group per class cannot.
+    paths_ok = ([f"t__real__for_train_{i}.jpg" for i in range(4)]
+                + [f"t__fake__for_train_{i}.jpg" for i in range(4)]
+                + [f"t__real__asv_dev_{i}.jpg" for i in range(4)]
+                + [f"t__fake__asv_dev_{i}.jpg" for i in range(4)])
+    targets_ok = [0] * 4 + [1] * 4 + [0] * 4 + [1] * 4
+    groups, reason = build_groups(paths_ok, targets_ok, 2)
+    assert groups is not None and "2 source groups" in reason, reason
+
+    # The degenerate case the recommendation missed: one folder per class, one group each.
+    paths_bad = [f"t__real__x_{i}.jpg" for i in range(4)] + [f"t__fake__x_{i}.jpg" for i in range(4)]
+    groups_bad, reason_bad = build_groups(paths_bad, [0] * 4 + [1] * 4, 2)
+    assert groups_bad is None and "not enough" in reason_bad, reason_bad
+
+    # Group split must not leak a source across the boundary.
+    tr, va = split_indices(targets_ok, 2, 0.25, seed=1, groups=groups)
+    assert not (set(tr) & set(va))
+    assert not ({groups[i] for i in va} & {groups[i] for i in tr}), "source leaked across the split"
+
+    # Stratified fallback keeps both classes on both sides.
+    tr, va = split_indices([0] * 50 + [1] * 50, 2, 0.2, seed=1)
+    assert sorted(([0] * 50 + [1] * 50)[i] for i in va).count(0) == 10
+
+    # Class weights must favour the minority class, not the majority.
+    counts = [37469, 77421]                       # the real imbalance in this dataset
+    total = sum(counts)
+    w = [total / (len(counts) * c) for c in counts]
+    assert w[0] > 1 > w[1], w
+    assert abs(w[0] * counts[0] - w[1] * counts[1]) < 1e-6, "weighted mass must balance"
+
     print("✅ audio training selfcheck passed")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arch", choices=BACKBONES, default="b0")
-    ap.add_argument("--epochs", type=int, default=10)
-    ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument("--epochs", type=int, default=15)
+    ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
     ap.add_argument("--data-dir", default="data/audio_spectrograms")
     ap.add_argument("--val-frac", type=float, default=0.15)
+    ap.add_argument("--split-by", choices=("source", "stratified"), default="source",
+                    help="source: hold out whole corpora (falls back to stratified if it cannot)")
+    ap.add_argument("--patience", type=int, default=4, help="early-stop after N epochs without gain")
+    ap.add_argument("--out", default=MODEL_SAVE_PATH)
     ap.add_argument("--out-dir", default="runs/latest_audio_run")
     ap.add_argument("--selfcheck", action="store_true")
     args = ap.parse_args()
@@ -135,59 +217,108 @@ def main():
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if device.type == "cpu":
-        print("⚠️ CUDA GPU not found. Training running on CPU. Estimated completion time will be longer.")
+        print("⚠️ No CUDA GPU — training on CPU will be slow.")
 
     if not os.path.exists(args.data_dir):
-        print(f"❌ Data directory '{args.data_dir}' not found. Run scripts/preprocess_audio.py first.")
-        sys.exit(1)
+        sys.exit(f"❌ '{args.data_dir}' not found. Run scripts/preprocess_audio.py first.")
 
     train_tf, val_tf = build_audio_transforms(224)
-    dataset = datasets.ImageFolder(args.data_dir, train_tf)
-    classes = dataset.classes
+    # Two views of the same folder so each split gets its own transform. The previous version
+    # split one dataset and gave the validation half the training transform.
+    base_train = datasets.ImageFolder(args.data_dir, train_tf)
+    base_val = datasets.ImageFolder(args.data_dir, val_tf)
+    classes = base_train.classes
+    targets = base_train.targets
+    paths = [p for p, _ in base_train.samples]
 
     real_candidates = [i for i, c in enumerate(classes) if c.lower() in ("real", "authentic", "genuine")]
-    real_idx = real_candidates[0] if real_candidates else 0
+    if not real_candidates:
+        sys.exit(f"❌ No 'real' class in {classes}. Defaulting to index 0 would invert every score.")
+    real_idx = real_candidates[0]
 
-    val_size = max(1, int(len(dataset) * args.val_frac))
-    train_size = len(dataset) - val_size
-    train_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, val_size])
+    groups, reason = (None, "stratified split requested")
+    if args.split_by == "source":
+        groups, reason = build_groups(paths, targets, len(classes))
+    print(f"🔀 Split: {reason}")
+    if groups is None and args.split_by == "source":
+        print("   Falling back to a stratified split. Validation may therefore share a corpus "
+              "with training, which inflates the number — test on a held-out corpus before "
+              "trusting it.")
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
+    train_idx, val_idx = split_indices(targets, len(classes), args.val_frac, 42, groups)
+    train_ds, val_ds = Subset(base_train, train_idx), Subset(base_val, val_idx)
 
-    ctor, weights, _ = BACKBONES[args.arch]
-    model = ctor(weights=weights)
-    if hasattr(model, "classifier") and isinstance(model.classifier, nn.Sequential):
-        in_feat = model.classifier[1].in_features
-        model.classifier[1] = nn.Linear(in_feat, len(classes))
-    elif hasattr(model, "classifier") and isinstance(model.classifier, nn.Linear):
-        model.classifier = nn.Linear(model.classifier.in_features, len(classes))
+    counts = [sum(1 for i in train_idx if targets[i] == c) for c in range(len(classes))]
+    print(f"📊 Classes {classes} (real='{classes[real_idx]}') | train {counts} | val {len(val_idx)}")
+    if min(counts) == 0:
+        sys.exit(f"❌ Class {classes[counts.index(0)]} has no training samples.")
 
-    model = model.to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
+    pin = device.type == "cuda"
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                              num_workers=args.workers, pin_memory=pin,
+                              drop_last=len(train_idx) > args.batch_size)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                            num_workers=args.workers, pin_memory=pin)
 
-    print(f"🚀 Training Audio Detector ({args.arch}) on {device} for {args.epochs} epochs...")
+    model = build_model(args.arch, len(classes)).to(device)
+
+    # Class weights: 37k real vs 77k fake trains a model that guesses "fake" and looks accurate.
+    total = sum(counts)
+    weights = torch.tensor([total / (len(counts) * c) for c in counts],
+                           dtype=torch.float32, device=device)
+    print(f"⚖️  Class weights: {[round(w, 3) for w in weights.tolist()]}")
+    criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.05)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=1)
+
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler(device.type, enabled=use_amp)
+
+    best_metric, best_state, stale = -1.0, None, 0
+    print(f"🚀 Training {args.arch} on {device} for up to {args.epochs} epochs "
+          f"(early stop after {args.patience} without improvement)...")
+
     for epoch in range(args.epochs):
         model.train()
-        running_loss = 0.0
+        running_loss, seen = 0.0, 0
         for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
+            inputs = inputs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type=device.type, enabled=use_amp):
+                loss = criterion(model(inputs), labels)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             running_loss += loss.item() * inputs.size(0)
+            seen += inputs.size(0)
 
         _, _, m = evaluate(model, val_loader, device, classes, real_idx)
-        print(f"Epoch {epoch + 1}/{args.epochs} | Loss {running_loss / len(train_ds):.4f} | Val Acc {m['acc']:.4f} | Balanced {m['balanced_acc']:.4f}")
+        scheduler.step(m["balanced_acc"])
+        print(f"Epoch {epoch + 1}/{args.epochs} | loss {running_loss / max(1, seen):.4f} | "
+              f"acc {m['acc']:.4f} | balanced {m['balanced_acc']:.4f} | AUC {m['auc_real_vs_rest']:.4f} | "
+              f"recall {({k: round(v, 3) for k, v in m['recall_per_class'].items()})}")
 
-    # Calibrate logits
+        # Select on balanced accuracy: plain accuracy rewards predicting the majority class.
+        if m["balanced_acc"] > best_metric:
+            best_metric, stale = m["balanced_acc"], 0
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            print(f"  ⭐ new best (balanced {best_metric:.4f})")
+        else:
+            stale += 1
+            if stale >= args.patience:
+                print(f"⏹️  Early stop at epoch {epoch + 1}; best balanced {best_metric:.4f}.")
+                break
+
+    if best_state is None:
+        sys.exit("❌ No epoch completed — nothing to save.")
+    print("↩️  Restoring best epoch (not the last one).")
+    model.load_state_dict(best_state)
+
     logits, labels, metrics = evaluate(model, val_loader, device, classes, real_idx)
     temperature = fit_temperature(logits, labels)
 
-    os.makedirs(os.path.dirname(MODEL_SAVE_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     torch.save({
         "state_dict": model.state_dict(),
         "arch": args.arch,
@@ -197,10 +328,20 @@ def main():
         "img_size": 224,
         "temperature": temperature,
         "val_metrics": metrics,
-    }, MODEL_SAVE_PATH)
-    print(f"💾 Saved audio model checkpoint -> {MODEL_SAVE_PATH}")
+        "class_counts": dict(zip(classes, counts)),
+        "split": reason,
+    }, args.out)
 
-    # Export XAI Grad-CAM explanation for sample
+    print("\nFINAL VALIDATION METRICS")
+    print(json.dumps({k: v for k, v in metrics.items() if k != "confusion"}, indent=2))
+    print(f"confusion (rows=true {classes}): {metrics['confusion']}")
+    print(f"temperature {temperature:.4f}")
+    print(f"💾 Saved checkpoint → {args.out}")
+    print("\nNext: python scripts/export_onnx.py --audio")
+    if groups is None:
+        print("⚠️  This number came from a split that may share a corpus with training. "
+              "Evaluate on an untouched corpus (FoR testing, ASVspoof eval) before quoting it.")
+
     try:
         sample_input, sample_label = val_ds[0]
         xai_out = os.path.join(args.out_dir, "xai_explanation.jpg")

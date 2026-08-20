@@ -28,6 +28,7 @@ DATASETS = [
 
 # Shared with inference_server.py so the two can never drift apart again.
 from common.config import MODEL_PATH as MODEL_SAVE_PATH
+from common.calibration import fit_temperature
 from common.metrics import binary_auc
 
 ONNX_SAVE_PATH = "public/models/deepfake_detector.onnx"
@@ -392,47 +393,6 @@ def evaluate(model, loader, device, classes, real_idx):
         "confusion": confusion,
     }
     return logits, labels, metrics
-
-
-def fit_temperature(logits, labels):
-    """Temperature scaling (Guo et al. 2017).
-
-    This is the direct fix for vague / overconfident trust scores: one scalar tuned
-    on the holdout so that a reported 80% actually means right 80% of the time.
-    """
-    # A handful of validation images cannot calibrate anything: the fit chases those few
-    # points and lands somewhere absurd (a smoke run here produced T=259, which flattens every
-    # probability to ~50% and turns every verdict into "uncertain").
-    if len(labels) < 50:
-        print(f"⚠️  Only {len(labels)} validation samples — too few to calibrate. Temperature = 1.0.")
-        return 1.0
-
-    log_t = torch.zeros(1, requires_grad=True)
-    nll = nn.CrossEntropyLoss()
-    opt = optim.LBFGS([log_t], lr=0.1, max_iter=60)
-
-    def closure():
-        opt.zero_grad()
-        loss = nll(logits / log_t.exp(), labels)
-        loss.backward()
-        return loss
-
-    opt.step(closure)
-    t = float(log_t.exp().item())
-    before = nll(logits, labels).item()
-    after = nll(logits / t, labels).item()
-    print(f"🌡️  Temperature {t:.3f} | val NLL {before:.4f} → {after:.4f}")
-
-    if after > before:
-        return 1.0
-    if t < 0.5:
-        # T well below 1 means the holdout was separated almost perfectly, so the fit is
-        # pushing every probability to 0 or 100. That is not calibration, it is a warning
-        # that the val set is too easy or too small to calibrate against.
-        print(f"⚠️  Temperature {t:.3f} < 0.5 — val set separates too cleanly to calibrate. "
-              f"Clamping to 1.0; use a larger or harder holdout (--val-frac, --eval-dir).")
-        return 1.0
-    return min(t, 10.0)
 
 
 def train_model(model, loaders, device, classes, real_idx, epochs, lr, freeze_epochs, counts,
