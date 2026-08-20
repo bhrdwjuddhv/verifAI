@@ -400,6 +400,13 @@ def fit_temperature(logits, labels):
     This is the direct fix for vague / overconfident trust scores: one scalar tuned
     on the holdout so that a reported 80% actually means right 80% of the time.
     """
+    # A handful of validation images cannot calibrate anything: the fit chases those few
+    # points and lands somewhere absurd (a smoke run here produced T=259, which flattens every
+    # probability to ~50% and turns every verdict into "uncertain").
+    if len(labels) < 50:
+        print(f"⚠️  Only {len(labels)} validation samples — too few to calibrate. Temperature = 1.0.")
+        return 1.0
+
     log_t = torch.zeros(1, requires_grad=True)
     nll = nn.CrossEntropyLoss()
     opt = optim.LBFGS([log_t], lr=0.1, max_iter=60)
@@ -428,8 +435,9 @@ def fit_temperature(logits, labels):
     return min(t, 10.0)
 
 
-def train_model(model, loaders, device, classes, real_idx, epochs, lr, freeze_epochs, counts):
-    os.makedirs(os.path.dirname(MODEL_SAVE_PATH), exist_ok=True)
+def train_model(model, loaders, device, classes, real_idx, epochs, lr, freeze_epochs, counts,
+                out_path=MODEL_SAVE_PATH):
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
     total = sum(counts)
     weights = torch.tensor([total / (len(counts) * c) for c in counts], device=device)
@@ -438,9 +446,17 @@ def train_model(model, loaders, device, classes, real_idx, epochs, lr, freeze_ep
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
     steps_per_epoch = max(1, len(loaders["train"]))
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=lr, epochs=epochs, steps_per_epoch=steps_per_epoch, pct_start=0.25
-    )
+    # OneCycle divides the run into warm-up and anneal phases; with only a handful of steps a
+    # phase can come out zero-length and the scheduler divides by zero. A short run (smoke test,
+    # a small fine-tune) gets a flat LR instead of a crash.
+    total_steps = epochs * steps_per_epoch
+    if total_steps < 10:
+        scheduler = None
+        print(f"ℹ️  Only {total_steps} optimizer steps — using a constant LR instead of OneCycle.")
+    else:
+        scheduler = optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=lr, epochs=epochs, steps_per_epoch=steps_per_epoch, pct_start=0.25
+        )
     use_amp = device.type == "cuda"
     scaler = torch.amp.GradScaler(device.type, enabled=use_amp)
 
@@ -461,7 +477,8 @@ def train_model(model, loaders, device, classes, real_idx, epochs, lr, freeze_ep
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-            scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
             running_loss += loss.item() * inputs.size(0)
             seen += inputs.size(0)
 
@@ -620,6 +637,13 @@ def main():
                     help="held-out dataset from a DIFFERENT source; the honest accuracy number")
     ap.add_argument("--eval-only", action="store_true",
                     help="load the saved checkpoint and just run --eval-dir")
+    ap.add_argument("--out", default=MODEL_SAVE_PATH,
+                    help="where to write the checkpoint. Defaults to the path the service reads, "
+                         "which is also --init's default — pass a new path when fine-tuning so a "
+                         "bad run cannot destroy the model you started from")
+    ap.add_argument("--init", default=None,
+                    help="fine-tune FROM this checkpoint instead of ImageNet weights "
+                         "(e.g. models/face/deepfake_detector.pth)")
     ap.add_argument("--selfcheck", action="store_true", help="run internal assertions and exit")
     args = ap.parse_args()
 
@@ -634,9 +658,9 @@ def main():
     if args.eval_only:
         if not args.eval_dir:
             sys.exit("❌ --eval-only needs --eval-dir.")
-        if not os.path.exists(MODEL_SAVE_PATH):
-            sys.exit(f"❌ No checkpoint at {MODEL_SAVE_PATH}.")
-        ckpt = torch.load(MODEL_SAVE_PATH, map_location=device, weights_only=True)
+        if not os.path.exists(args.out):
+            sys.exit(f"❌ No checkpoint at {args.out}.")
+        ckpt = torch.load(args.out, map_location=device, weights_only=True)
         classes, real_idx, img_size = ckpt["classes"], ckpt["real_idx"], ckpt["img_size"]
         model = build_model(ckpt["arch"], len(classes)).to(device)
         model.load_state_dict(ckpt["state_dict"])
@@ -670,8 +694,19 @@ def main():
     print(f"🎯 Trust score will be P(class '{classes[real_idx]}') at index {real_idx}")
 
     model = build_model(args.arch, len(classes)).to(device)
+    if args.init:
+        prior = torch.load(args.init, map_location=device, weights_only=True)
+        if prior.get("arch", args.arch) != args.arch:
+            sys.exit(f"❌ {args.init} is arch '{prior.get('arch')}' but --arch is '{args.arch}'.")
+        if list(prior.get("classes", classes)) != list(classes):
+            sys.exit(f"❌ {args.init} was trained on classes {prior.get('classes')}, this data has "
+                     f"{classes}. Fine-tuning across different label sets silently inverts scores.")
+        model.load_state_dict(prior["state_dict"])
+        print(f"↻ Fine-tuning from {args.init} "
+              f"(its val balanced acc was {prior.get('val_metrics', {}).get('balanced_acc', float('nan')):.4f})")
+
     model = train_model(model, loaders, device, classes, real_idx,
-                        args.epochs, args.lr, args.freeze_epochs, counts)
+                        args.epochs, args.lr, args.freeze_epochs, counts, args.out)
 
     logits, labels, metrics = evaluate(model, loaders["val"], device, classes, real_idx)
     temperature = fit_temperature(logits, labels)
@@ -687,8 +722,8 @@ def main():
         "face_crop": bool(manifest.get("face_crop", False)),
         "face_margin": manifest.get("margin", 0.35),
         "val_metrics": metrics,
-    }, MODEL_SAVE_PATH)
-    print(f"💾 Saved checkpoint → {MODEL_SAVE_PATH}")
+    }, args.out)
+    print(f"💾 Saved checkpoint → {args.out}")
     print(json.dumps({k: v for k, v in metrics.items() if k != "confusion"}, indent=2))
 
     if args.eval_dir:

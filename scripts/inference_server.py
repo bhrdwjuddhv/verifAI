@@ -38,6 +38,7 @@ from PIL import Image, UnidentifiedImageError
 from common.config import (
     AUDIO_MODEL_PATH,
     FAKE_ABOVE,
+    ONNX_PATH,
     FUSION_WEIGHTS,
     VIDEO_FRAME_CAP,
     VIDEO_MAX_SECONDS,
@@ -49,8 +50,8 @@ from common.config import (
 )
 from common.xai import encode_overlay, gradcam_overlay
 
-# Torch-free build artifacts (see export_onnx.py and the Dockerfile's lean stage).
-ONNX_PATH = os.environ.get("VERIFAI_ONNX", os.path.join("models", "detector.onnx"))
+# Torch-free build artifacts (see export_onnx.py and the Dockerfile's lean stage). ONNX_PATH
+# comes from common.config so the exporter and the server resolve the same file.
 YUNET_PATH = os.environ.get("VERIFAI_YUNET", os.path.join("models", "face_detection_yunet.onnx"))
 
 MAX_BYTES = 50 * 1024 * 1024
@@ -389,14 +390,30 @@ def load_npr_engine():
 
 
 def load_engine():
+    """Try each source in order and FALL THROUGH on failure.
+
+    Committing to the first candidate whose file merely exists was a bug: dropping a .pth next
+    to the ONNX made the torch-free build pick the .pth, fail on `import torch`, and report no
+    face model at all — with a perfectly good ONNX sitting right there. Existence is not
+    loadability, so each attempt has to be allowed to fail.
+    """
+    attempts = []
     if os.path.exists(MODEL_PATH):
-        print(f"[MODEL] checkpoint {MODEL_PATH}")
-        return load_checkpoint_engine()
+        attempts.append((f"checkpoint {MODEL_PATH}", load_checkpoint_engine))
     if os.path.exists(ONNX_PATH):
-        print(f"[MODEL] ONNX {ONNX_PATH} (torch-free build)")
-        return load_onnx_engine()
-    print(f"[MODEL] no checkpoint at {MODEL_PATH} -> Hugging Face fallback {HF_FALLBACK_MODEL}")
-    return load_hf_engine()
+        attempts.append((f"ONNX {ONNX_PATH} (torch-free)", load_onnx_engine))
+    attempts.append((f"Hugging Face fallback {HF_FALLBACK_MODEL}", load_hf_engine))
+
+    errors = []
+    for label, loader in attempts:
+        print(f"[MODEL] trying {label}")
+        try:
+            return loader()
+        except Exception as e:
+            errors.append(f"{label}: {type(e).__name__}: {e}")
+            print(f"[MODEL]  -> unavailable ({type(e).__name__}: {e})")
+
+    raise RuntimeError("no face model could be loaded — " + " | ".join(errors))
 
 
 class YuNetDetector:

@@ -44,7 +44,14 @@ venv/
 .dhash_cache.json
 
 # training artifacts & datasets
-/models/
+# Exclude the CONTENTS, not the directory — git cannot re-include a file whose parent dir is
+# excluded. The trained face ONNX has to be committed: the Docker build has no way to fetch it,
+# so without it a deploy silently falls back to the third-party model. 16MB, fine for git.
+/models/*
+!/models/face/
+/models/face/*
+!/models/face/detector.onnx
+!/models/face/detector.json
 /public/models/
 /runs/
 

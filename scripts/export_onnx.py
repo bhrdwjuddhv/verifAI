@@ -29,6 +29,7 @@ if hasattr(sys.stderr, "reconfigure"):
 from common.config import (
     AUDIO_CHECKPOINT,
     AUDIO_MODEL_PATH,
+    ONNX_PATH,
     HF_FALLBACK_EXPECTS_FACE,
     HF_FALLBACK_MODEL,
     MODEL_PATH,
@@ -36,7 +37,6 @@ from common.config import (
     NPR_MODEL_PATH,
 )
 
-ONNX_PATH = os.environ.get("VERIFAI_ONNX", os.path.join("models", "detector.onnx"))
 META_PATH = os.path.splitext(ONNX_PATH)[0] + ".json"
 
 
@@ -202,7 +202,16 @@ def main():
     print(json.dumps(meta, indent=2))
 
     # Agreement check: an export that silently changed the answer is worse than no export.
-    verify(args.out, meta, model, side)
+    # On failure the artifact is REMOVED — leaving a rejected file on disk is how a bad export
+    # gets picked up later by a path lookup that only checks existence.
+    try:
+        verify(args.out, meta, model, side)
+    except SystemExit:
+        for junk in (args.out, meta_path):
+            if os.path.exists(junk):
+                os.remove(junk)
+                print(f"removed rejected artifact {junk}")
+        raise
 
 
 def verify(onnx_path, meta, torch_model, side):

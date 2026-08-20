@@ -7,8 +7,32 @@ module, imported by both, so a mismatch is impossible rather than merely unlikel
 
 import os
 
-# Written by train_deepfake_detector.py, read by inference_server.py.
-MODEL_PATH = os.environ.get("VERIFAI_MODEL", os.path.join("models", "deepfake_detector.pth"))
+
+def first_existing(*candidates):
+    """First path that exists, else the last one (so error messages name the canonical spot).
+
+    Lets a trained model dropped into models/face/ take precedence over the generic fallback
+    without anyone having to set an env var on the deploy host — while an explicit env var
+    still wins over both.
+    """
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[-1]
+
+
+# Written by train_deepfake_detector.py, read by inference_server.py. models/face/ is checked
+# first: that is where a trained face model goes, and it should beat the generic fallback.
+MODEL_PATH = os.environ.get("VERIFAI_MODEL") or first_existing(
+    os.path.join("models", "face", "deepfake_detector.pth"),
+    os.path.join("models", "deepfake_detector.pth"),
+)
+
+# The torch-free face classifier. Same precedence.
+ONNX_PATH = os.environ.get("VERIFAI_ONNX") or first_existing(
+    os.path.join("models", "face", "detector.onnx"),
+    os.path.join("models", "detector.onnx"),
+)
 
 # Used only when no trained checkpoint exists. Verified against the Hugging Face API
 # on 2026-08-15: ViTForImageClassification, 224px, id2label {0: Realism, 1: Deepfake}.

@@ -49,6 +49,12 @@ export default function ModelCardPage() {
             <Row label="1. Face classifier">
               Answers “was this face swapped or manipulated”. Runs on the largest detected face,
               cropped with a 35% margin. Abstains — casts no vote — when no face is found.
+              <br />
+              Currently <span className="font-mono text-brand-blue-300">onnx:trained_checkpoint</span>:
+              EfficientNet-B0 fine-tuned on Kaggle deepfake data, classes{' '}
+              <span className="font-mono">Fake</span>/<span className="font-mono">Real</span>, with a
+              temperature of 0.72 fitted on its own held-out split — so its confidence is calibrated,
+              unlike the third-party fallback it replaced.
             </Row>
             <Row label="2. NPR (whole image)">
               <span className="font-mono text-brand-blue-300">NPR</span>, Tan et al., CVPR 2024,
@@ -134,6 +140,14 @@ export default function ModelCardPage() {
         <section className="mt-10">
           <h2 className="text-lg font-semibold mb-2">Measured performance</h2>
           <dl>
+            <Row label="Face classifier, in-distribution">
+              <span className="font-mono text-emerald-300">balanced accuracy 0.717 · AUC 0.779</span>
+              <span className="text-ink-400">
+                {' '}— measured on the held-out split of its own training data (39,898 validation
+                images; recall 0.729 fake / 0.706 real), reported by the trainer and stored in the
+                checkpoint as <span className="font-mono">val_metrics</span>.
+              </span>
+            </Row>
             <Row label="Face classifier, cross-dataset">
               <TBD how="python scripts/train_deepfake_detector.py --eval-only --eval-dir <unseen dataset>" />
             </Row>
@@ -150,21 +164,18 @@ export default function ModelCardPage() {
             <Row label="Cross-dataset AUC">
               <TBD how="same command; reported next to the in-distribution number" />
             </Row>
-            <Row label="In-distribution accuracy">
-              <TBD how="printed by the trainer and stored in the checkpoint as val_metrics" />
-            </Row>
+
             <Row label="Calibration">
-              The trainer fits a temperature on the holdout, and the service reports{' '}
-              <span className="font-mono">calibrated: true</span> only when one was applied. The
-              Hugging Face fallback is <strong>uncalibrated</strong> — its confidence is a ranking,
-              not a probability.
+              The active face model carries a fitted temperature (0.72) and the service reports{' '}
+              <span className="font-mono">calibrated: true</span>. NPR and the Hugging Face fallback
+              are <strong>uncalibrated</strong> — their confidence is a ranking, not a probability.
             </Row>
           </dl>
           <p className="text-xs text-ink-400 mt-4 leading-relaxed font-normal">
-            In-distribution accuracy on a Kaggle split mostly measures how well a model memorized one
-            generator’s fingerprint. The cross-dataset number is the one that predicts field
-            behaviour, and it is normally much lower. That is why both rows exist, and why neither is
-            filled in yet.
+            0.717 balanced accuracy is a real measurement, and it is also a modest one — roughly
+            seven correct calls in ten, on data drawn from the same source it trained on. Accuracy on
+            a <em>different</em> generator is normally lower still, and that row is empty because
+            nobody has run it. Treat the in-distribution number as an upper bound, not a promise.
           </p>
         </section>
 
