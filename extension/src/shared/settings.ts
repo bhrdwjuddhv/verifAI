@@ -14,26 +14,27 @@ export const DEFAULT_SERVER_URL = 'https://verif-ai-blue.vercel.app';
 /** Bump when the consent copy changes materially; users are re-asked. */
 export const CONSENT_VERSION = 1;
 
-export type ScanMode = 'server' | 'device' | 'ask';
-
 export interface Settings {
-  /** Origin of the VerifAI web app. `/api/scan` is appended to it. */
-  serverUrl: string;
   /**
-   * 'server' uploads the file for a deep scan; 'device' runs the bundled models locally
-   * (Phase 2); 'ask' prompts per scan. Default is 'server' because it is the only mode with
-   * a trained model behind it today.
+   * Origin of the VerifAI web app — the destination for a deep scan, when one is asked for.
+   * `/api/scan` is appended to it.
    */
-  mode: ScanMode;
+  serverUrl: string;
   /** CONSENT_VERSION the user accepted, or 0. Deep scan is inert below the current version. */
   consentVersion: number;
   /** Phase 4. Off by design, and on-device only when it lands. */
   autoScan: boolean;
 }
 
+/**
+ * There is deliberately no "always upload" setting.
+ *
+ * Scans run on this machine. A deep scan is offered per scan, where the server genuinely does
+ * more, and asks before it uploads. A mode toggle would be the same binary one layer down —
+ * a thing to get wrong once and then forget, with every later scan silently uploading.
+ */
 export const DEFAULTS: Settings = {
   serverUrl: DEFAULT_SERVER_URL,
-  mode: 'server',
   consentVersion: 0,
   autoScan: false,
 };

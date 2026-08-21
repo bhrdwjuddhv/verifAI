@@ -66,23 +66,23 @@ const RESULT = {
 const SCANS = [
   {
     id: 'a', createdAt: Date.now(), mediaUrl: 'https://cdn.example.com/media/portrait_04.jpg',
-    kind: 'image', source: 'server', phase: 'done', cached: false, bytes: 412_233, result: RESULT,
+    kind: 'image', source: 'device', phase: 'done', cached: false, bytes: 412_233, ms: 812, result: RESULT,
   },
   {
-    id: 'b', createdAt: Date.now() - 60_000, mediaUrl: 'blob:https://web.whatsapp.com/9f2c',
-    kind: 'image', source: 'server', phase: 'needs-permission', needsOrigin: 'https://cdn.example.com/*',
+    id: 'c', createdAt: Date.now() - 60_000, mediaUrl: 'https://cdn.example.com/clip.mp4',
+    kind: 'video', source: 'device', phase: 'error', errorKind: 'not-implemented', offerServer: true,
+    error: 'Scoring a whole video means sampling frames across it, which only the server does.',
   },
   {
-    id: 'c', createdAt: Date.now() - 120_000, mediaUrl: 'https://cdn.example.com/clip.mp4',
-    kind: 'video', source: 'server', phase: 'error', errorKind: 'unavailable',
-    error: 'Analysis unavailable — MODEL_SERVICE_URL is not set.',
+    id: 'b', createdAt: Date.now() - 120_000, mediaUrl: 'blob:https://web.whatsapp.com/9f2c',
+    kind: 'image', source: 'server', phase: 'needs-consent',
   },
 ];
 
 const STUB = `
 <script>
   const scans = ${JSON.stringify(SCANS)};
-  const settings = { serverUrl: 'http://localhost:3000', mode: 'server', consentVersion: 1, autoScan: false };
+  const settings = { serverUrl: 'https://verif-ai-blue.vercel.app', consentVersion: 0, autoScan: false };
   const noop = () => {};
   window.chrome = {
     runtime: {

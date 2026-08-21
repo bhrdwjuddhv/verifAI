@@ -87,10 +87,8 @@ async function adoptOpenTabs(matches: string[]): Promise<void> {
 export async function autoAllowed(url: string | undefined): Promise<{ ok: boolean; reason?: string }> {
   const settings = await getSettings();
   if (!settings.autoScan) return { ok: false, reason: 'auto-scan is off' };
-  // The one rule that makes auto-scan acceptable at all. Enforced here, not just in the UI.
-  if (settings.mode !== 'device') {
-    return { ok: false, reason: 'auto-scan only runs on-device, and the current mode uploads' };
-  }
+  // Auto-scan is on-device by construction: it never passes a `source`, and a scan without one
+  // runs locally. There is no setting that can turn a feed into an upload.
   if (!url) return { ok: false, reason: 'no page URL' };
 
   for (const site of await grantedSites()) {
