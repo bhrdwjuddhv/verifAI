@@ -21,13 +21,14 @@ if hasattr(sys.stdout, 'reconfigure'):
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from torchvision import datasets, transforms, models
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.calibration import fit_temperature
 from common.config import AUDIO_CHECKPOINT as MODEL_SAVE_PATH
+from common.datasets import TransformSubset
 from common.metrics import binary_auc
 from common.xai import gradcam_overlay
 from train_deepfake_detector import split_indices
@@ -223,13 +224,14 @@ def main():
         sys.exit(f"❌ '{args.data_dir}' not found. Run scripts/preprocess_audio.py first.")
 
     train_tf, val_tf = build_audio_transforms(224)
-    # Two views of the same folder so each split gets its own transform. The previous version
-    # split one dataset and gave the validation half the training transform.
-    base_train = datasets.ImageFolder(args.data_dir, train_tf)
-    base_val = datasets.ImageFolder(args.data_dir, val_tf)
-    classes = base_train.classes
-    targets = base_train.targets
-    paths = [p for p, _ in base_train.samples]
+    # One index, two transforms. Each split still gets its own augmentation — the previous
+    # version gave validation the *training* transform, which is the bug that mattered — but
+    # the tree is only walked once.
+    print(f"Indexing {args.data_dir} once...")
+    base = datasets.ImageFolder(args.data_dir)
+    classes = base.classes
+    targets = base.targets
+    paths = [p for p, _ in base.samples]
 
     real_candidates = [i for i, c in enumerate(classes) if c.lower() in ("real", "authentic", "genuine")]
     if not real_candidates:
@@ -246,7 +248,8 @@ def main():
               "trusting it.")
 
     train_idx, val_idx = split_indices(targets, len(classes), args.val_frac, 42, groups)
-    train_ds, val_ds = Subset(base_train, train_idx), Subset(base_val, val_idx)
+    train_ds = TransformSubset(base, train_idx, train_tf)
+    val_ds = TransformSubset(base, val_idx, val_tf)
 
     counts = [sum(1 for i in train_idx if targets[i] == c) for c in range(len(classes))]
     print(f"📊 Classes {classes} (real='{classes[real_idx]}') | train {counts} | val {len(val_idx)}")
@@ -256,9 +259,11 @@ def main():
     pin = device.type == "cuda"
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.workers, pin_memory=pin,
-                              drop_last=len(train_idx) > args.batch_size)
+                              drop_last=len(train_idx) > args.batch_size,
+                              persistent_workers=args.workers > 0)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                            num_workers=args.workers, pin_memory=pin)
+                            num_workers=args.workers, pin_memory=pin,
+                            persistent_workers=args.workers > 0)
 
     model = build_model(args.arch, len(classes)).to(device)
 

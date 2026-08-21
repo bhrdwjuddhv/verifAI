@@ -29,10 +29,11 @@ if hasattr(sys.stdout, "reconfigure"):
 import torch
 import torch.nn as nn
 from PIL import Image, ImageFilter
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from common.config import NPR_CHECKPOINT
+from common.datasets import TransformSubset
 from models.npr_model import IMG_SIZE, MEAN, STD, NPRDetector, load_npr
 from common.metrics import binary_auc
 from train_deepfake_detector import RandomJpeg, split_indices
@@ -106,23 +107,28 @@ def build_transforms(resample_aug):
 
 def loaders(data_dir, batch_size, workers, val_frac, resample_aug, seed=42):
     train_tf, val_tf = build_transforms(resample_aug)
-    base_train = datasets.ImageFolder(data_dir, train_tf)
-    base_val = datasets.ImageFolder(data_dir, val_tf)
-    classes = base_train.classes
+
+    # ONE walk of the tree. Building ImageFolder twice (once per transform) stats every file
+    # twice — ~10 minutes each on a 279k-file symlinked Kaggle dataset, before epoch one.
+    print(f"Indexing {data_dir} once...")
+    base = datasets.ImageFolder(data_dir)
+    classes = base.classes
     fake_i = fake_class_index(classes)
 
-    train_idx, val_idx = split_indices(base_train.targets, len(classes), val_frac, seed)
-    counts = [base_train.targets.count(i) for i in range(len(classes))]
-    print(f"classes {classes} (fake = '{classes[fake_i]}') | counts {counts} | val {len(val_idx)}")
+    train_idx, val_idx = split_indices(base.targets, len(classes), val_frac, seed)
+    counts = [base.targets.count(i) for i in range(len(classes))]
+    print(f"classes {classes} (fake = '{classes[fake_i]}') | counts {counts} | "
+          f"train {len(train_idx)} | val {len(val_idx)}")
     if min(counts) == 0:
         sys.exit(f"Class {classes[counts.index(0)]} has no images.")
 
     pin = torch.cuda.is_available()
     return (
-        DataLoader(Subset(base_train, train_idx), batch_size=batch_size, shuffle=True,
-                   num_workers=workers, pin_memory=pin, drop_last=len(train_idx) > batch_size),
-        DataLoader(Subset(base_val, val_idx), batch_size=batch_size, shuffle=False,
-                   num_workers=workers, pin_memory=pin),
+        DataLoader(TransformSubset(base, train_idx, train_tf), batch_size=batch_size, shuffle=True,
+                   num_workers=workers, pin_memory=pin, drop_last=len(train_idx) > batch_size,
+                   persistent_workers=workers > 0),
+        DataLoader(TransformSubset(base, val_idx, val_tf), batch_size=batch_size, shuffle=False,
+                   num_workers=workers, pin_memory=pin, persistent_workers=workers > 0),
         classes, fake_i, counts,
     )
 

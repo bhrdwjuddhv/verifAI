@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from PIL import Image
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from torchvision import datasets, transforms, models
 
 # Multi-Dataset Kaggle Deepfake Benchmarks:
@@ -29,6 +29,7 @@ DATASETS = [
 # Shared with inference_server.py so the two can never drift apart again.
 from common.config import MODEL_PATH as MODEL_SAVE_PATH
 from common.calibration import fit_temperature
+from common.datasets import TransformSubset
 from common.metrics import binary_auc
 
 ONNX_SAVE_PATH = "public/models/deepfake_detector.onnx"
@@ -309,24 +310,26 @@ def get_data_loaders(data_dir, img_size, batch_size, workers, val_frac=0.15, see
         src = train_dir if os.path.isdir(train_dir) else root
         print(f"ℹ️  No Validation folder — carving a {val_frac:.0%} holdout from {src} "
               f"(split-by: {split_by})")
-        # Two views of the same folder so each split gets its own transform.
-        base_train = datasets.ImageFolder(src, train_tf)
-        base_val = datasets.ImageFolder(src, val_tf)
-        classes = base_train.classes
+        # One index, two transforms: building ImageFolder per-transform stats every file
+        # twice, which on a large tree is minutes of waiting for an index already in memory.
+        print(f"ℹ️  Indexing {src} once...")
+        base = datasets.ImageFolder(src)
+        base_train = base
+        classes = base.classes
 
         groups = None
         if split_by == "group":
             groups = group_near_duplicates(
-                [p for p, _ in base_train.samples],
+                [p for p, _ in base.samples],
                 cache_path=os.path.join(src, ".dhash_cache.json"),
             )
 
         train_idx, val_idx = split_indices(
-            base_train.targets, len(classes), val_frac, seed, groups
+            base.targets, len(classes), val_frac, seed, groups
         )
-        train_ds = Subset(base_train, train_idx)
-        val_ds = Subset(base_val, val_idx)
-        train_targets = [base_train.targets[i] for i in train_idx]
+        train_ds = TransformSubset(base, train_idx, train_tf)
+        val_ds = TransformSubset(base, val_idx, val_tf)
+        train_targets = [base.targets[i] for i in train_idx]
 
     counts = [train_targets.count(i) for i in range(len(classes))]
     print(f"📊 Classes {classes} | train counts {counts} | val size {len(val_ds)}")
