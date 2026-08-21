@@ -21,15 +21,18 @@ def first_existing(*candidates):
     return candidates[-1]
 
 
-# Written by train_deepfake_detector.py, read by inference_server.py. models/face/ is checked
-# first: that is where a trained face model goes, and it should beat the generic fallback.
+# Written by train_deepfake_detector.py, read by inference_server.py. Newest first: a v2
+# checkpoint in models/face/ beats v1, which beats the generic path, which beats the HF
+# fallback. An explicit env var beats all of them.
 MODEL_PATH = os.environ.get("VERIFAI_MODEL") or first_existing(
+    os.path.join("models", "face", "deepfake_detector_v2.pth"),
     os.path.join("models", "face", "deepfake_detector.pth"),
     os.path.join("models", "deepfake_detector.pth"),
 )
 
 # The torch-free face classifier. Same precedence.
 ONNX_PATH = os.environ.get("VERIFAI_ONNX") or first_existing(
+    os.path.join("models", "face", "detector_v2.onnx"),
     os.path.join("models", "face", "detector.onnx"),
     os.path.join("models", "detector.onnx"),
 )
@@ -83,6 +86,11 @@ VIDEO_MAX_SECONDS = float(os.environ.get("VIDEO_MAX_SECONDS", "60"))
 
 # Voice. Absent by default; the route says so rather than guessing. Train with
 # train_audio_detector.py, export with `export_onnx.py --audio`, drop the .onnx in.
-AUDIO_CHECKPOINT = os.environ.get("VERIFAI_AUDIO_CHECKPOINT",
-                                  os.path.join("models", "audio_deepfake_detector.pth"))
-AUDIO_MODEL_PATH = os.environ.get("AUDIO_MODEL_PATH", os.path.join("models", "audio_detector.onnx"))
+AUDIO_CHECKPOINT = os.environ.get("VERIFAI_AUDIO_CHECKPOINT") or first_existing(
+    os.path.join("models", "audio", "audio_deepfake_detector.pth"),
+    os.path.join("models", "audio_deepfake_detector.pth"),
+)
+AUDIO_MODEL_PATH = os.environ.get("AUDIO_MODEL_PATH") or first_existing(
+    os.path.join("models", "audio", "audio_detector.onnx"),
+    os.path.join("models", "audio_detector.onnx"),
+)

@@ -2,7 +2,8 @@
 
     POST /predict         one image  -> fused verdict + per-detector signals + heatmap
     POST /predict-video   short clip -> sampled frames, aggregated, fused
-    POST /predict-audio   voice clip -> mel-spectrogram -> voice model (501 until one exists)
+    POST /predict-audio   voice clip -> mel-spectrogram -> voice model
+    POST /predict-audio-window  2-4s window -> VAD gate -> voice model (live calls)
 
 Detectors, fused by FUSION_WEIGHTS over whichever ones actually ran:
     face   face-swap classifier, on the cropped face
@@ -272,6 +273,7 @@ def load_onnx_engine(model_path=None):
     source = meta_file.get("source", "onnx")
     if meta_file.get("quantized"):
         source += "+int8"
+    source += f"({os.path.basename(model_path)})"
     meta = {
         "modelSource": f"onnx:{source}",
         "classes": labels,
@@ -279,6 +281,8 @@ def load_onnx_engine(model_path=None):
         "calibrated": bool(meta_file.get("calibrated", False)),
         "device": "cpu (onnxruntime)",
         "valMetrics": meta_file.get("valMetrics"),
+        "valSplit": meta_file.get("valSplit"),
+        "imgSize": size,
         "quantized": bool(meta_file.get("quantized")),
     }
     return predict, meta
@@ -809,9 +813,88 @@ def analyze_audio(path):
     }
 
 
+# --- live-call windows -------------------------------------------------------------------
+# A call is mostly silence, breathing and line noise. Scoring those produces confident
+# nonsense, so a window has to look like speech before the model is allowed an opinion.
+VAD_MIN_DBFS = float(os.environ.get("VERIFAI_VAD_MIN_DBFS", "-45"))
+VAD_MAX_FLATNESS = float(os.environ.get("VERIFAI_VAD_MAX_FLATNESS", "0.45"))
+
+
+def speech_metrics(samples, sr=16000):
+    """(is_speech, {rmsDbfs, spectralFlatness}).
+
+    Two cheap gates, no model:
+      * loudness — silence and room tone sit far below speech,
+      * spectral flatness — geometric/arithmetic mean of the power spectrum. Voiced speech is
+        harmonic, so flatness is low; hiss, fans and codec comfort-noise approach 1.
+
+    A sustained pure tone also passes, which is a known and acceptable false accept: it is a
+    gate on "is there something worth scoring", not a speech classifier.
+    """
+    y = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if y.size < 256:
+        return False, {"rmsDbfs": None, "spectralFlatness": None, "reason": "window too short"}
+
+    rms = float(np.sqrt(np.mean(y * y)))
+    dbfs = 20.0 * float(np.log10(rms + 1e-12))
+    if dbfs < VAD_MIN_DBFS:
+        return False, {"rmsDbfs": round(dbfs, 1), "spectralFlatness": None,
+                       "reason": f"too quiet ({dbfs:.0f} dBFS < {VAD_MIN_DBFS:.0f})"}
+
+    window = np.hanning(len(y))
+    power = np.abs(np.fft.rfft(y * window)) ** 2
+    power = power[1:]                      # drop DC; it says nothing about voicing
+    power = power[power > 0]
+    if power.size == 0:
+        return False, {"rmsDbfs": round(dbfs, 1), "spectralFlatness": None, "reason": "no spectrum"}
+
+    flatness = float(np.exp(np.mean(np.log(power))) / np.mean(power))
+    if flatness > VAD_MAX_FLATNESS:
+        return False, {"rmsDbfs": round(dbfs, 1), "spectralFlatness": round(flatness, 3),
+                       "reason": f"noise-like (flatness {flatness:.2f} > {VAD_MAX_FLATNESS:.2f})"}
+
+    return True, {"rmsDbfs": round(dbfs, 1), "spectralFlatness": round(flatness, 3), "reason": None}
+
+
+def analyze_audio_window(samples, sr=16000):
+    """Score one short window. The live path: no file, no verdict bands, just the number.
+
+    Bands are deliberately absent here — a single 3-second window is not a verdict about a
+    call. Phase 4 aggregates windows over time and applies hysteresis; this returns evidence.
+    """
+    from preprocess_audio import spectrogram_from_samples
+
+    seconds = round(len(samples) / float(sr), 2) if sr else 0.0
+    is_speech, vad = speech_metrics(samples, sr)
+    base = {
+        "speechDetected": is_speech,
+        "windowSeconds": seconds,
+        "vad": vad,
+        "modelSource": AUDIO_META.get("modelSource"),
+    }
+    if not is_speech:
+        # Not scored on purpose. Returning a probability here is how a live guard cries wolf
+        # at a silent room.
+        return {**base, "fakeProbability": None,
+                "notes": [f"not scored: {vad['reason']}"]}
+
+    image = spectrogram_from_samples(samples, sr, AUDIO_META.get("imgSize", 224))
+    if image is None:
+        return {**base, "fakeProbability": None, "notes": ["could not build a spectrogram"]}
+
+    fake_prob, _ = AUDIO_PREDICT(image, explain=False)
+    notes = []
+    if not AUDIO_META.get("calibrated", False):
+        notes.append("uncalibrated — treat as a ranking, not a probability")
+    if AUDIO_META.get("valSplit") and "source" not in str(AUDIO_META.get("valSplit")):
+        notes.append("this model's validation split was not source-held-out; its reported "
+                     "accuracy is optimistic until evaluated on an untouched corpus")
+    return {**base, "fakeProbability": int(round(100.0 * fake_prob)), "notes": notes}
+
+
 def create_app():
     """App factory. Deploy with: uvicorn inference_server:create_app --factory --host 0.0.0.0"""
-    from fastapi import FastAPI, File, HTTPException, UploadFile
+    from fastapi import FastAPI, File, Form, HTTPException, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
 
     if PREDICT is None and LOAD_ERROR is None:
@@ -886,6 +969,53 @@ def create_app():
                 os.remove(temp_path)
             except OSError:
                 pass
+
+    @app.post("/predict-audio-window")
+    def predict_audio_window(
+        file: UploadFile = File(...),
+        sample_rate: int = Form(16000),
+        encoding: str = Form("wav"),
+    ):
+        """One short window (2-4s) for a live call. WAV or raw 16-bit PCM.
+
+        WAV and PCM only, deliberately: decoding Opus/WebM would mean ffmpeg in the runtime
+        image, and the browser can encode WAV from an AudioContext in a few lines.
+        """
+        if AUDIO_PREDICT is None:
+            raise HTTPException(
+                status_code=501,
+                detail=f"Voice detection is not available ({AUDIO_META.get('reason')}).",
+            )
+
+        raw = file.file.read()
+        if len(raw) > 8 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Window exceeds 8MB — send 2-4 seconds.")
+
+        if encoding.lower() in ("pcm", "pcm16", "s16le"):
+            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            sr = int(sample_rate)
+        else:
+            from preprocess_audio import read_audio
+
+            fd, temp_path = tempfile.mkstemp(suffix=".wav")
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(raw)
+                samples = read_audio(temp_path, 16000, 10.0)
+                sr = 16000
+            finally:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+            if samples is None:
+                raise HTTPException(status_code=415,
+                                    detail="Could not decode this window. Send WAV or raw PCM16.")
+
+        try:
+            return analyze_audio_window(samples, sr)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
     @app.post("/predict-audio")
     def predict_audio(file: UploadFile = File(...)):
@@ -1012,6 +1142,24 @@ def selfcheck():
         return sum((v - m) ** 2 for v in values) / len(values)
     assert variance(frames_steady) == 0.0
     assert variance(frames_flicker) == 2500.0, "alternating frames must read as high variance"
+
+    # VAD: the gate that stops a live guard scoring silence.
+    sr = 16000
+    t = np.arange(sr, dtype=np.float32) / sr
+    silence = np.zeros(sr, dtype=np.float32)
+    quiet_room = (np.random.default_rng(0).standard_normal(sr) * 0.0005).astype(np.float32)
+    hiss = (np.random.default_rng(1).standard_normal(sr) * 0.2).astype(np.float32)
+    voiced = sum(np.sin(2 * np.pi * f * t) / (i + 1)
+                 for i, f in enumerate((150, 300, 450, 600))).astype(np.float32) * 0.3
+
+    assert speech_metrics(silence, sr)[0] is False, "silence must not be scored"
+    assert speech_metrics(quiet_room, sr)[0] is False, "room tone must not be scored"
+    ok, m = speech_metrics(hiss, sr)
+    assert ok is False and "flatness" in m["reason"], f"white noise must be rejected: {m}"
+    ok, m = speech_metrics(voiced, sr)
+    assert ok is True, f"harmonic speech-like audio must pass the gate: {m}"
+    assert speech_metrics(np.zeros(10), sr)[0] is False, "a 10-sample window is not speech"
+    assert m["rmsDbfs"] < 0, "dBFS is negative for anything below full scale"
 
     from common.xai import selfcheck as xai_selfcheck
 

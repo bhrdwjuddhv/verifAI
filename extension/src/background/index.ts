@@ -93,6 +93,39 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   });
 });
 
+import { guardStatus, onLiveWindow, startGuard, stopGuard } from './liveguard';
+
+// Live Guard messages are handled before the scan router: they are their own feature and must
+// keep working while a file scan is queued.
+chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
+  if (message?.type === 'guard:start') {
+    startGuard(message.tabId).then(sendResponse);
+    return true;
+  }
+  if (message?.type === 'guard:stop') {
+    stopGuard().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (message?.type === 'guard:get-status') {
+    sendResponse(guardStatus());
+    return false;
+  }
+  if (message?.type === 'offscreen:live-window') {
+    // The offscreen document cannot send an ArrayBuffer through chrome messaging, so the
+    // window arrives base64-encoded and is decoded here.
+    const binary = atob(message.wavBase64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    void onLiveWindow(bytes.buffer);
+    return false;
+  }
+  if (message?.type === 'offscreen:live-error') {
+    void stopGuard();
+    return false;
+  }
+  return undefined;
+});
+
 chrome.runtime.onMessage.addListener((message: UiRequest | ContentEvent, sender, sendResponse) => {
   if (message?.type?.startsWith('auto:')) {
     handleAuto(message as ContentEvent, sender)

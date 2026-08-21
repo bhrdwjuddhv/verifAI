@@ -56,29 +56,38 @@ export type ModelServiceResponse =
  * There is no fallback path on purpose. When this fails the caller reports that analysis
  * is unavailable — a guessed verdict is worse than no verdict.
  */
-export async function callModelService(
+/** One short live-call window. No verdict band: that is Phase 4's job, over many windows. */
+export interface AudioWindowResult {
+  speechDetected: boolean;
+  fakeProbability: number | null;
+  windowSeconds: number;
+  vad: { rmsDbfs: number | null; spectralFlatness: number | null; reason: string | null };
+  modelSource: string | null;
+  notes: string[];
+}
+
+export type AudioWindowResponse =
+  | { ok: true; result: AudioWindowResult }
+  | { ok: false; detail: string; status?: number };
+
+/** Transport only — POST a file to the service and hand back parsed JSON or a reason. */
+async function postToService(
+  path: string,
   file: Blob,
   filename: string,
-  path: '/predict' | '/predict-video' | '/predict-audio' = '/predict',
-  /**
-   * Extra query parameters for the service. Only `explain` is used today: a caller that does
-   * not need the heatmap can skip it and save the service 26 forward passes. An older service
-   * ignores unknown parameters, so sending one is safe before the service is redeployed.
-   */
   query?: Record<string, string>
-): Promise<ModelServiceResponse> {
+): Promise<{ ok: true; json: any } | { ok: false; detail: string; status?: number }> {
   const base = process.env.MODEL_SERVICE_URL?.replace(/\/$/, '');
   if (!base) {
     return { ok: false, detail: 'MODEL_SERVICE_URL is not set — no model service is configured.' };
   }
 
   const search = query && Object.keys(query).length ? `?${new URLSearchParams(query)}` : '';
-  const endpoint = `${base}${path}${search}`;
   try {
     const form = new FormData();
     form.append('file', file, filename);
 
-    const res = await fetch(endpoint, {
+    const res = await fetch(`${base}${path}${search}`, {
       method: 'POST',
       headers: {
         // Tunnels (ngrok / localtunnel) serve an interstitial HTML page without these.
@@ -100,15 +109,46 @@ export async function callModelService(
         status: res.status,
       };
     }
-
-    const result = (await res.json()) as ModelServiceResult;
-    if (!result || typeof result.verdict !== 'string') {
-      return { ok: false, detail: 'Model service returned an unrecognized response.' };
-    }
-    return { ok: true, result };
+    return { ok: true, json: await res.json() };
   } catch (err: any) {
     return { ok: false, detail: `Could not reach the model service: ${err?.message || 'network error'}.` };
   }
+}
+
+/**
+ * Single door to the model service, for the public and admin routes alike.
+ *
+ * There is no fallback path on purpose. When this fails the caller reports that analysis
+ * is unavailable — a guessed verdict is worse than no verdict.
+ */
+export async function callModelService(
+  file: Blob,
+  filename: string,
+  path: '/predict' | '/predict-video' | '/predict-audio' = '/predict',
+  /**
+   * Extra query parameters for the service. Only `explain` is used today: a caller that does
+   * not need the heatmap can skip it and save the service 26 forward passes.
+   */
+  query?: Record<string, string>
+): Promise<ModelServiceResponse> {
+  const res = await postToService(path, file, filename, query);
+  if (!res.ok) return res;
+  const result = res.json as ModelServiceResult;
+  if (!result || typeof result.verdict !== 'string') {
+    return { ok: false, detail: 'Model service returned an unrecognized response.' };
+  }
+  return { ok: true, result };
+}
+
+/** Live-call windows. Validated on `speechDetected`, since a window carries no verdict. */
+export async function callAudioWindow(file: Blob, filename = 'window.wav'): Promise<AudioWindowResponse> {
+  const res = await postToService('/predict-audio-window', file, filename);
+  if (!res.ok) return res;
+  const result = res.json as AudioWindowResult;
+  if (!result || typeof result.speechDetected !== 'boolean') {
+    return { ok: false, detail: 'Model service returned an unrecognized window response.' };
+  }
+  return { ok: true, result };
 }
 
 /**

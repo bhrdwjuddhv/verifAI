@@ -31,11 +31,17 @@
     "scripting",
     "activeTab",
     "offscreen",
-    "alarms"
+    "alarms",
+    "tabCapture"
   ],
   "optional_host_permissions": [
     "http://*/*",
-    "https://*/*"
+    "https://*/*",
+    "https://meet.google.com/*",
+    "https://discord.com/*",
+    "https://teams.microsoft.com/*",
+    "https://teams.live.com/*",
+    "https://*.zoom.us/*"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

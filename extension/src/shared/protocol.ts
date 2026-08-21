@@ -44,6 +44,12 @@ export interface ScanState {
   tabId?: number;
 }
 
+/** Live Guard messages. The worker owns the session; the overlay and popup only render it. */
+export type GuardRequest =
+  | { type: 'guard:start'; tabId: number }
+  | { type: 'guard:stop' }
+  | { type: 'guard:get-status' };
+
 /** UI (popup / options / onboarding) -> service worker. */
 export type UiRequest =
   | { type: 'ui:get-state' }

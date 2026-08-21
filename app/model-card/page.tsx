@@ -157,9 +157,24 @@ export default function ModelCardPage() {
             <Row label="Fused, on a labelled set">
               <TBD how="python scripts/tune_fusion.py --data-dir <labelled set> — also picks the weights" />
             </Row>
-            <Row label="Voice model">
-              <span className="font-mono text-amber-300">no model yet</span>
-              <span className="text-ink-400"> (the route reports 501 rather than guessing)</span>
+            <Row label="Voice model, clean audio">
+              <span className="font-mono text-amber-300">reported 1.000 — not trustworthy</span>
+              <span className="text-ink-400">
+                {' '}The trained checkpoint records perfect validation accuracy on 14,721 samples,
+                with <span className="font-mono">split: &quot;stratified&quot;</span> — i.e. not
+                source-held-out. A perfect score on ASVspoof + FoR is evidence that the same
+                corpora sat on both sides of the split, not that the detector is perfect. Every
+                voice verdict carries this caveat in its notes.
+              </span>
+            </Row>
+            <Row label="Voice model, call conditions">
+              <TBD how="python scripts/eval_call_audio.py --data-dir <held-out corpus> — G.711, narrowband, packet loss, noise" />
+              <span className="text-ink-400">
+                {' '}This is the number that describes Live Guard. A model measured on studio WAVs
+                has not been measured for a phone call: G.711 companding, the 3.4kHz telephone
+                band and dropped packets all remove the high-frequency detail these detectors
+                lean on.
+              </span>
             </Row>
             <Row label="Cross-dataset AUC">
               <TBD how="same command; reported next to the in-distribution number" />

@@ -98,6 +98,10 @@ def load_checkpoint(path=None, source="trained_checkpoint"):
         "expectsFace": bool(ckpt.get("face_crop", False)),
         "temperature": float(ckpt.get("temperature", 1.0)),
         "calibrated": float(ckpt.get("temperature", 1.0)) != 1.0,
+        # Carried so the service can qualify the number instead of quoting it bare: a model
+        # validated without a source-held-out split reports optimistic accuracy.
+        "valSplit": ckpt.get("split"),
+        "valMetrics": ckpt.get("val_metrics"),
     }
     return model, meta
 

@@ -7,6 +7,7 @@
  */
 
 import { score, type ScoreRequest } from './score';
+import { startCapture, stopCapture } from './live';
 import { backend } from './session';
 import { wasmAllowed } from '../shared/wasm';
 
@@ -70,3 +71,36 @@ chrome.runtime.onMessage.addListener(handle);
 // scripts/preview.mjs drives this document in an ordinary tab to exercise ONNX Runtime, the
 // wasm load and the real image decode without installing the extension.
 (self as unknown as { __verifaiHandler?: typeof handle }).__verifaiHandler = handle;
+
+
+/**
+ * Live Guard capture lives here because only a document has getUserMedia and AudioContext.
+ * Windows go back to the worker base64-encoded: chrome messaging JSON-serialises, so an
+ * ArrayBuffer would silently arrive as `{}`.
+ */
+chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
+  if (message?.type === 'offscreen:live-start') {
+    startCapture(message.streamId, message.windowSeconds, {
+      onWindow: (wav) => {
+        let binary = '';
+        const bytes = new Uint8Array(wav);
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        chrome.runtime
+          .sendMessage({ type: 'offscreen:live-window', wavBase64: btoa(binary) })
+          .catch(() => undefined);
+      },
+      onError: (reason) => {
+        chrome.runtime.sendMessage({ type: 'offscreen:live-error', reason }).catch(() => undefined);
+      },
+    })
+      .then(() => sendResponse({ ok: true }))
+      .catch((err: Error) => sendResponse({ ok: false, reason: err.message }));
+    return true;
+  }
+  if (message?.type === 'offscreen:live-stop') {
+    void stopCapture();
+    sendResponse({ ok: true });
+    return false;
+  }
+  return undefined;
+});

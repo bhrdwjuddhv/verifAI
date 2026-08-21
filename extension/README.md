@@ -7,6 +7,31 @@ All five build phases are implemented. The status table below is the current sta
 
 ---
 
+## Live Guard (live calls)
+
+Monitors a call **playing in a browser tab** — Google Meet, Discord web, Teams web, Zoom web —
+and shows a live trust score, a per-window timeline, and a warning when synthetic voice signal
+persists. It never ends a call.
+
+**What it cannot do, and will not pretend to:** a native desktop app (Zoom, Teams, WhatsApp,
+Discord's own client) and a cellular phone call are both invisible to an extension. No browser
+API exposes their audio. If your call is not in a tab, Live Guard is not running, and the
+overlay will not appear.
+
+Other limits, stated rather than buried:
+
+- Audio windows go to **your** VerifAI backend (`/api/live/audio-window`), which runs this
+  project's trained voice model. Nothing is sent anywhere else. On-device audio is not
+  implemented — see below.
+- Verdicts are refused unless `modelSource` names one of this project's trained models. A
+  score from the Hugging Face fallback is shown as a refusal, not as a number.
+- `tabCapture` is requested in the manifest; the call platforms are **optional** host
+  permissions, granted per platform when you start monitoring.
+- Capturing tab audio mutes the tab unless the stream is played back — Live Guard routes it
+  through at unity gain, so you still hear your call.
+
+---
+
 ## Status
 
 | Phase | State |

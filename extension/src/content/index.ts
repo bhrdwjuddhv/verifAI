@@ -9,6 +9,7 @@
  * and a badge that inherits `img { width: 100% }` is a badge that covers the post.
  */
 
+import { renderGuard } from './liveguard';
 import type { ContentRequest, ScanState } from '../shared/protocol';
 import { detectorRows, fakePercent, NEUTRAL } from '../shared/format';
 import { startAuto, stopAuto } from './auto';
@@ -393,3 +394,15 @@ const CSS_TEXT = `
     .heatmap { display: block; width: 100%; border-radius: 6px; margin: 8px 0 4px; }
     .caption { margin: 4px 0 0; color: #767D93; font-size: 11px; }
 `;
+
+
+// Live Guard overlay: the worker pushes status, this only draws it.
+chrome.runtime.onMessage.addListener((message: any) => {
+  if (message?.type === 'guard:status') renderGuard(message.status);
+  return undefined;
+});
+
+// A reload mid-call should not leave the user believing monitoring stopped when it has not.
+chrome.runtime.sendMessage({ type: 'guard:get-status' })
+  .then((status) => { if (status?.active) renderGuard(status); })
+  .catch(() => undefined);

@@ -169,8 +169,10 @@ function copyModels() {
   fs.mkdirSync(out, { recursive: true });
 
   const wanted = [
-    ['models/face/detector.onnx', 'detector.onnx'],
-    ['models/face/detector.json', 'detector.json'],
+    // The trained face model, newest first. The build ships whichever exists; on-device mode
+    // reports the filename it loaded, so a stale bundle is visible rather than silent.
+    ['models/face/detector_v2.onnx', 'detector.onnx'],
+    ['models/face/detector_v2.json', 'detector.json'],
     ['models/npr_detector.onnx', 'npr.onnx'],
     ['models/npr_detector.json', 'npr.json'],
     ['models/face_detection_yunet.onnx', 'yunet.onnx'],
