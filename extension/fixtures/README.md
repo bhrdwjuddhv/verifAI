@@ -7,7 +7,7 @@ npm run parity:capture     # asks the live server for its verdict on each
 npm run parity             # serves the comparison page
 ```
 
-PLAN.md P4 asks for **30 images**: 10 real, 10 face-swap, 10 fully generated, at least 5 with
+Aim for **30 images**: 10 real, 10 face-swap, 10 fully generated, at least 5 with
 no face at all. The mix matters more than the count:
 
 - **no-face images** are the only ones that exercise NPR voting alone, and the abstain path;

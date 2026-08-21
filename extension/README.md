@@ -3,7 +3,7 @@
 Right-click any image or video → **Verify with VerifAI** → the same verdict the website gives,
 with the same per-detector breakdown, in place.
 
-Built to [`PLAN.md`](PLAN.md). **Phases 0, 1 and 2 are implemented**; Phase 3 onwards is not.
+All five build phases are implemented. The status table below is the current state.
 
 ---
 
@@ -192,7 +192,7 @@ simulated clip swap on the same element. 11 assertions, no network, no YouTube.
 
 ## Parity harness
 
-Standing rule 2 in [PLAN.md](PLAN.md) is that on-device and server must agree. This measures it.
+On-device and server must agree — that is the rule this whole port exists to keep. This measures it.
 
 ```bash
 npm run parity:capture && npm run parity
