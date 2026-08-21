@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>VerifAI offscreen worker</title>
+  </head>
+  <body>
+    <!-- Never shown. This document exists so onnxruntime-web has a DOM, a WebGPU adapter and
+         a lifetime longer than the service worker's ~30s idle timeout (PLAN.md, Phase 2). -->
+    <script type="module" src="/src/offscreen/index.ts"></script>
+  </body>
+</html>

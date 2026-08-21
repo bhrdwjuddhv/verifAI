@@ -72,3 +72,16 @@ ngrok.zip
 flow.md
 youhavetodo.md
 .github 
+
+# browser extension — its own toolchain, built separately from the Next app.
+# node_modules above is root-anchored, so the extension's copy needs its own line.
+# Model binaries and the ORT wasm are COPIED IN at build time (from /models and
+# node_modules); committing them would double the repo and bloat every Vercel deploy.
+/extension/node_modules
+/extension/dist
+/extension/public/models
+/extension/public/ort
+/extension/*.zip
+# Parity fixtures: large, and mostly not ours to redistribute. The README stays.
+/extension/fixtures/*
+!/extension/fixtures/README.md

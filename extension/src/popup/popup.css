@@ -1,0 +1,148 @@
+/* Popup-only layout. 380px is the widest Chrome renders without a scrollbar on Windows. */
+
+body.popup {
+  width: 380px;
+  max-height: 580px;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+body.popup header { padding-bottom: 2px; }
+body.popup header a { text-decoration: none; font-size: 12px; }
+
+main { display: flex; flex-direction: column; gap: 8px; }
+
+/* The video path. YouTube overrides right-click on its player, so on Shorts and Reels this
+   is not a shortcut — it is the only way in. */
+#tab-actions:empty { display: none; }
+#tab-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+#tab-actions button { width: 100%; }
+#tab-actions .why { font-size: 11px; color: var(--text-faint); }
+#tab-actions .why a { cursor: pointer; text-decoration: underline; }
+
+.section-title {
+  margin-top: 4px;
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.card.scan { display: flex; flex-direction: column; gap: 9px; }
+.card.empty { color: var(--text-soft); }
+.card.stale { border-color: #F59E0B; background: rgba(245, 158, 11, .08); }
+.card.stale b { color: #FBBF24; }
+.card.stale p { margin: 4px 0 0; }
+.card.empty p:last-child { margin-bottom: 0; }
+
+.scan-head { display: flex; align-items: center; gap: 8px; }
+.scan-head h2 { line-height: 1.2; }
+.scan-head .score { margin-left: auto; font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }
+.scan-head .close { padding: 2px 6px; border: none; color: var(--text-faint); font-size: 15px; line-height: 1; }
+.scan-head .score + .close { margin-left: 0; }
+.scan-head .close:only-of-type { margin-left: auto; }
+
+.summary { margin: 0; color: var(--text-soft); }
+.src { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gap { gap: 8px; }
+
+.detectors { display: flex; flex-direction: column; gap: 7px; }
+.detector {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "name value" "bar bar" "weight weight";
+  gap: 3px 8px;
+  align-items: center;
+}
+.detector .name { grid-area: name; color: var(--text-soft); }
+.detector .value { grid-area: value; }
+.detector .bar { grid-area: bar; }
+.detector .weight { grid-area: weight; font-size: 10px; justify-self: end; margin-top: -2px; }
+
+.bar > i.indeterminate {
+  width: 40%;
+  animation: slide 1.2s ease-in-out infinite;
+}
+@keyframes slide {
+  0% { margin-left: 0 }
+  50% { margin-left: 60% }
+  100% { margin-left: 0 }
+}
+
+.heatmap {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  display: block;
+}
+
+.disclosure {
+  text-align: left;
+  padding: 5px 0;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+}
+.disclosure::before { content: "▸ "; }
+.disclosure.open::before { content: "▾ "; }
+
+.reasons {
+  margin: 2px 0 0;
+  padding-left: 16px;
+  color: var(--text-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.actions { display: flex; gap: 8px; }
+.error-text { margin: 0; color: #FCA5A5; }
+
+.meta { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.meta .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.compact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+.compact-label { flex: none; }
+.compact .src { flex: 1; min-width: 0; }
+
+footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.modes { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.modes button {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 4px 9px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.modes button + button { border-left: 1px solid var(--line); }
+.modes button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.modes button:not(.on):hover { color: var(--text); }

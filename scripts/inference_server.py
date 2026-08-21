@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import tempfile
+from typing import Optional
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -485,8 +486,13 @@ def startup():
           f"| expectsFace={META['expectsFace']} | faceDetector={'on' if DETECTOR else 'off'}")
 
 
-def analyze(image):
-    """The whole verdict, as a dict. Kept out of the endpoint so it stays testable."""
+def analyze(image, explain=None):
+    """The whole verdict, as a dict. Kept out of the endpoint so it stays testable.
+
+    explain=None keeps whatever GRADCAM is set to, which is what every existing caller gets.
+    explain=False skips the heatmap: the browser extension asks for that on feed scans, where
+    nothing displays one and it costs 26 forward passes per image.
+    """
     from preprocess_faces import crop_face
 
     notes = []
@@ -516,7 +522,7 @@ def analyze(image):
         if META["expectsFace"] and DETECTOR is None:
             notes.append("face detector unavailable; ran the full frame through a face model")
         try:
-            fake_prob, heatmap = PREDICT(target)
+            fake_prob, heatmap = PREDICT(target, explain=explain)
             # Band the number we are going to SHOW. Deciding on 70.4 and displaying 70 next to
             # a rule that says "above 70 is fake" is a contradiction the reader can see.
             face_pct = float(round(100.0 * fake_prob))
@@ -547,7 +553,7 @@ def analyze(image):
     verdict, confidence = verdict_for(fused)
     if not META.get("calibrated", False):
         notes.append("confidence is uncalibrated — treat it as a ranking, not a probability")
-    if heatmap is None and GRADCAM and face_pct is not None:
+    if heatmap is None and (GRADCAM if explain is None else explain) and face_pct is not None:
         notes.append("no explanation heatmap available for this model")
     if META.get("quantized"):
         notes.append("int8-quantized build; scores can differ from the full-precision model by a point or two")
@@ -827,13 +833,16 @@ def create_app():
         return {"status": "ok" if (PREDICT or NPR_PREDICT) else "no_model", "error": LOAD_ERROR,
                 "faceDetector": DETECTOR is not None, "npr": NPR_META, "audio": AUDIO_META,
                 "fusionWeights": FUSION_WEIGHTS,
+                # The extension mirrors these locally; /api/extension/manifest relays them so a
+                # retune here cannot leave installed clients scoring against stale settings.
+                "saliencyGrid": SALIENCY_GRID,
                 "thresholds": {"fakeAbove": FAKE_ABOVE, "realBelow": REAL_BELOW}, **META}
 
     # Deliberately `def`, not `async def`: inference is CPU-bound and would otherwise block
     # the event loop for its whole duration, starving the platform's health checks until it
     # restarts the container mid-request. FastAPI runs sync endpoints in a threadpool.
     @app.post("/predict")
-    def predict_image(file: UploadFile = File(...)):
+    def predict_image(file: UploadFile = File(...), explain: Optional[bool] = None):
         if PREDICT is None and NPR_PREDICT is None:
             raise HTTPException(status_code=503, detail=f"No model loaded: {LOAD_ERROR}")
 
@@ -847,7 +856,7 @@ def create_app():
             raise HTTPException(status_code=415, detail="Images only in this version.")
 
         try:
-            return analyze(image)
+            return analyze(image, explain)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 

@@ -117,7 +117,14 @@ export async function POST(req: NextRequest) {
 
     const endpoint =
       fileType === 'video' ? '/predict-video' : fileType === 'audio' ? '/predict-audio' : '/predict';
-    const service = await callModelService(fileBlob, filename, endpoint);
+
+    // `?explain=0` skips the explanation heatmap. A feed-driven scan does not display one,
+    // and producing it costs the service 26 extra forward passes per image. Absent means
+    // "whatever the service is configured to do", which is what every existing caller gets.
+    const explain = req.nextUrl.searchParams.get('explain');
+    const query = explain === '0' || explain === 'false' ? { explain: '0' } : undefined;
+
+    const service = await callModelService(fileBlob, filename, endpoint, query);
     if (!service.ok) {
       // "Not implemented" and "your file is unusable" are not the same thing as "the service
       // is down", and collapsing all three into 503 tells the user the wrong story. Pass the

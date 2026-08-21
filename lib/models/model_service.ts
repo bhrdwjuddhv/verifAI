@@ -59,14 +59,21 @@ export type ModelServiceResponse =
 export async function callModelService(
   file: Blob,
   filename: string,
-  path: '/predict' | '/predict-video' | '/predict-audio' = '/predict'
+  path: '/predict' | '/predict-video' | '/predict-audio' = '/predict',
+  /**
+   * Extra query parameters for the service. Only `explain` is used today: a caller that does
+   * not need the heatmap can skip it and save the service 26 forward passes. An older service
+   * ignores unknown parameters, so sending one is safe before the service is redeployed.
+   */
+  query?: Record<string, string>
 ): Promise<ModelServiceResponse> {
   const base = process.env.MODEL_SERVICE_URL?.replace(/\/$/, '');
   if (!base) {
     return { ok: false, detail: 'MODEL_SERVICE_URL is not set — no model service is configured.' };
   }
 
-  const endpoint = `${base}${path}`;
+  const search = query && Object.keys(query).length ? `?${new URLSearchParams(query)}` : '';
+  const endpoint = `${base}${path}${search}`;
   try {
     const form = new FormData();
     form.append('file', file, filename);

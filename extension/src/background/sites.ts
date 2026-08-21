@@ -1,0 +1,103 @@
+/**
+ * Site access for auto-scan, and the content script that goes with it.
+ *
+ * Nothing is registered at install time. A content script is registered only for origins the
+ * user has explicitly granted, and unregistered the moment the grant is revoked or auto-scan
+ * is switched off — so the extension's site access always matches what the options page says
+ * it is, with no stale registration surviving in the background.
+ */
+
+import { getSettings } from '../shared/settings';
+import { AUTO_SITES, matchesHost, type AutoSite } from '../shared/sites';
+
+export { AUTO_SITES };
+export type { AutoSite };
+
+const SCRIPT_ID = 'verifai-auto';
+
+export async function grantedSites(): Promise<AutoSite[]> {
+  const granted: AutoSite[] = [];
+  for (const site of AUTO_SITES) {
+    if (await chrome.permissions.contains({ origins: site.origins })) granted.push(site);
+  }
+  return granted;
+}
+
+/**
+ * Brings the registered content script in line with the settings and the grants.
+ *
+ * Registration is all-or-nothing per call rather than incremental: computing the diff would
+ * be a second source of truth about what is registered, and the two would drift.
+ */
+export async function syncContentScripts(): Promise<void> {
+  const settings = await getSettings();
+  const sites = await grantedSites();
+  const matches = settings.autoScan ? sites.flatMap((site) => site.origins) : [];
+
+  const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [SCRIPT_ID] }).catch(() => []);
+
+  if (!matches.length) {
+    if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [SCRIPT_ID] });
+    return;
+  }
+
+  const definition: chrome.scripting.RegisteredContentScript = {
+    id: SCRIPT_ID,
+    js: ['content.js'],
+    matches,
+    runAt: 'document_idle',
+    // The feed is in the top document; scanning every ad iframe as well would be noise.
+    allFrames: false,
+    persistAcrossSessions: true,
+  };
+
+  if (existing.length) await chrome.scripting.updateContentScripts([definition]);
+  else await chrome.scripting.registerContentScripts([definition]);
+
+  await adoptOpenTabs(matches);
+}
+
+/**
+ * Registration only affects future navigations.
+ *
+ * Without this, switching auto-scan on while sitting on a Shorts tab does nothing at all
+ * until the page is reloaded — which reads as "the feature is broken", because from the
+ * outside it is indistinguishable.
+ */
+async function adoptOpenTabs(matches: string[]): Promise<void> {
+  let tabs: chrome.tabs.Tab[] = [];
+  try {
+    tabs = await chrome.tabs.query({ url: matches });
+  } catch {
+    return;
+  }
+
+  for (const tab of tabs) {
+    if (tab.id === undefined) continue;
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+      await chrome.tabs.sendMessage(tab.id, { type: 'content:auto', enabled: true });
+    } catch {
+      // A tab that is still loading, or discarded. It will pick the script up on its own.
+    }
+  }
+}
+
+/** Whether auto-scan should actually run in a given tab. */
+export async function autoAllowed(url: string | undefined): Promise<{ ok: boolean; reason?: string }> {
+  const settings = await getSettings();
+  if (!settings.autoScan) return { ok: false, reason: 'auto-scan is off' };
+  // The one rule that makes auto-scan acceptable at all. Enforced here, not just in the UI.
+  if (settings.mode !== 'device') {
+    return { ok: false, reason: 'auto-scan only runs on-device, and the current mode uploads' };
+  }
+  if (!url) return { ok: false, reason: 'no page URL' };
+
+  for (const site of await grantedSites()) {
+    if (await chrome.permissions.contains({ origins: site.origins })) {
+      const host = new URL(url).hostname;
+      if (site.origins.some((pattern) => matchesHost(pattern, host))) return { ok: true };
+    }
+  }
+  return { ok: false, reason: 'this site is not granted' };
+}

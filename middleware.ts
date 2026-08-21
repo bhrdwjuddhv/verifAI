@@ -4,12 +4,18 @@ import { validateCsrfToken, CSRF_COOKIE_NAME, CSRF_HEADER_NAME } from './lib/adm
 
 const COOKIE_NAME = 'verifai_admin_session';
 
-// In-memory rate limiting stores for Edge Middleware
+// In-memory rate limiting stores for Edge Middleware.
+//
+// NOTE: these Maps live in one Edge instance, not in shared storage. With more than one
+// instance serving traffic the real ceiling is a multiple of the numbers below. They are a
+// courtesy brake against a runaway client, not a security control.
 const publicRateLimitMap = new Map<string, { count: number; resetTime: number }>();
+const extensionRateLimitMap = new Map<string, { count: number; resetTime: number }>();
 const adminRateLimitMap = new Map<string, { count: number; resetTime: number }>();
 
 const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
 const PUBLIC_MAX_REQUESTS = 20;       // 20 req/min for public API
+const EXTENSION_MAX_REQUESTS = 15;    // 15 req/min for the browser extension, counted separately
 const ADMIN_MAX_REQUESTS = 60;        // 60 req/min for admin routes
 
 const BLOCKED_USER_AGENTS = [
@@ -96,13 +102,26 @@ export async function middleware(req: NextRequest) {
   if (pathname.startsWith('/api/') && !isAdminApiRoute) {
     const ip = req.headers.get('x-forwarded-for')?.split(',')[0] || '127.0.0.1';
     const now = Date.now();
-    const currentRecord = publicRateLimitMap.get(ip);
+
+    // The browser extension gets its own counter. Sharing one meant a user scanning images
+    // could rate-limit themselves out of the website they were reading, and vice versa —
+    // the same person, two tools, one budget.
+    //
+    // The trade this makes: the header is self-declared, so someone who sends it gets a
+    // second bucket and a combined 35/min instead of 20. That is accepted deliberately. The
+    // limiter is a brake on accidental floods, and the alternative — one shared counter —
+    // breaks a legitimate user for the sake of inconveniencing a determined one.
+    const isExtension = /^extension\//.test(req.headers.get('x-verifai-client') ?? '');
+    const store = isExtension ? extensionRateLimitMap : publicRateLimitMap;
+    const maxRequests = isExtension ? EXTENSION_MAX_REQUESTS : PUBLIC_MAX_REQUESTS;
+
+    const currentRecord = store.get(ip);
 
     if (!currentRecord || now > currentRecord.resetTime) {
-      publicRateLimitMap.set(ip, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
+      store.set(ip, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
     } else {
       currentRecord.count += 1;
-      if (currentRecord.count > PUBLIC_MAX_REQUESTS) {
+      if (currentRecord.count > maxRequests) {
         return new NextResponse(
           JSON.stringify({
             error: 'Too Many Requests',
