@@ -9,9 +9,10 @@ TransformSubset holds ONE index and applies its own transform, so the second wal
 Nothing about the split, the labels or the augmentation changes — `selfcheck` asserts the
 tensors are identical to the two-index version, because "equivalent" is the whole claim.
 """
-
-from PIL import Image
+from PIL import Image, ImageFile
 from torch.utils.data import Dataset
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 class TransformSubset(Dataset):
