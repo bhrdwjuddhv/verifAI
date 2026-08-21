@@ -14,7 +14,6 @@ import {
   normalizeOrigin,
   originPattern,
   setSettings,
-  type ScanMode,
 } from '../shared/settings';
 import { fmtBytes } from '../shared/format';
 import { AUTO_SITES } from '../shared/sites';
@@ -23,8 +22,6 @@ import { clear, h } from '../ui/dom';
 declare const __VERSION__: string;
 declare const __TARGET__: string;
 
-const modeSelect = document.getElementById('mode') as HTMLSelectElement;
-const modeNote = document.getElementById('mode-note')!;
 const serverInput = document.getElementById('server') as HTMLInputElement;
 const serverStatus = document.getElementById('server-status')!;
 const consentState = document.getElementById('consent-state')!;
@@ -35,9 +32,7 @@ async function ask(request: UiRequest): Promise<UiResponse> {
 
 async function boot(): Promise<void> {
   const settings = await getSettings();
-  modeSelect.value = settings.mode;
   serverInput.value = settings.serverUrl;
-  paintModeNote(settings.mode);
 
   consentState.textContent =
     settings.consentVersion >= CONSENT_VERSION
@@ -45,7 +40,7 @@ async function boot(): Promise<void> {
       : 'Not accepted yet — deep scan will ask before it uploads anything.';
 
   autoScanBox.checked = settings.autoScan;
-  paintAutoNote(settings.mode, settings.autoScan);
+  paintAutoNote(settings.autoScan);
   await paintSites();
 
   await paintPermission(settings.serverUrl);
@@ -59,23 +54,18 @@ const autoNote = document.getElementById('auto-note')!;
 autoScanBox.addEventListener('change', async () => {
   await setSettings({ autoScan: autoScanBox.checked });
   const settings = await getSettings();
-  paintAutoNote(settings.mode, settings.autoScan);
+  paintAutoNote(settings.autoScan);
   await paintSites();
 });
 
-function paintAutoNote(mode: ScanMode, enabled: boolean): void {
+function paintAutoNote(enabled: boolean): void {
   if (!enabled) {
     autoNote.textContent = 'Off. Nothing is watched, and no content script runs on any site.';
     autoNote.className = 'muted';
     return;
   }
-  if (mode !== 'device') {
-    autoNote.textContent =
-      'Enabled, but inert: the current mode uploads, and auto-scan never does. Switch to on-device above to actually use it.';
-    autoNote.className = 'pill-bad';
-    return;
-  }
-  autoNote.textContent = 'Running on the sites allowed below. Everything is scored locally.';
+  autoNote.textContent =
+    'Running on the sites allowed below. Everything is scored on this machine — auto-scan never uploads.';
   autoNote.className = 'pill-ok';
 }
 
@@ -114,19 +104,6 @@ async function paintSites(): Promise<void> {
     target.append(row);
   }
 }
-
-function paintModeNote(mode: ScanMode): void {
-  modeNote.textContent =
-    mode === 'device'
-      ? 'Images are decoded and scored here, on this machine. Nothing is uploaded and no consent is needed. Whichever detectors are bundled vote; any that are missing abstain and say so, rather than being replaced by a guess.'
-      : 'Files are uploaded to the server below, scored there, and the verdict comes back with the per-detector breakdown.';
-}
-
-modeSelect.addEventListener('change', async () => {
-  const mode = modeSelect.value as ScanMode;
-  await setSettings({ mode });
-  paintModeNote(mode);
-});
 
 document.getElementById('save')!.addEventListener('click', async () => {
   const serverUrl = normalizeOrigin(serverInput.value);

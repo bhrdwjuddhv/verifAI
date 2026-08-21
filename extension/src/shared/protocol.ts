@@ -36,6 +36,11 @@ export interface ScanState {
   cached?: boolean;
   /** Started by auto-scan rather than by a right-click. */
   auto?: boolean;
+  /**
+   * True when the server could do better than this result — a video that only got one frame
+   * locally. The popup turns it into a button rather than making the user know to switch.
+   */
+  offerServer?: boolean;
   /** Wall-clock milliseconds of on-device inference. Absent for deep scans. */
   ms?: number;
   result?: ScanResult;
@@ -65,6 +70,8 @@ export type UiRequest =
    * it is a deliberate, expensive action, not a recovery.
    */
   | { type: 'ui:explain'; id: string }
+  /** Re-run one scan against the server, whatever the default mode is. */
+  | { type: 'ui:rescan-server'; id: string }
   | { type: 'ui:clear-cache' }
   | { type: 'ui:cache-stats' }
   /** Runs the offscreen capability probe — spikes S1 and S2 in PLAN.md, on this machine. */
