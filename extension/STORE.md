@@ -107,9 +107,10 @@ third-party services. The extension talks to exactly one server: the one the use
 | User activity (clicks, mouse position, keystrokes) | No |
 | **Website content** | **Yes — in deep scan mode only** |
 
-**Website content, stated plainly.** In deep scan mode, the image or video frame the user
-chooses to verify is uploaded to the VerifAI server they configured, analysed, and the verdict
-returned. Nothing else is sent: no page URL, no cookies, no browsing history, no identifiers.
+**Website content, stated plainly.** Scans run on the user's machine by default and upload
+nothing. A "deep scan" — offered for video, where the server samples every frame — uploads the
+file the user selected to the VerifAI server they configured, after a confirmation naming that
+server. It is never automatic. Nothing else is sent: no page URL, no cookies, no browsing history, no identifiers.
 The user accepts this on a first-run screen that says so before any upload happens, and
 on-device mode does not upload at all.
 
@@ -129,22 +130,15 @@ Required single purpose statement:
 
 ## Publishing, step by step
 
-### 1. Decide what the default scan mode should be — before anything else
+### 1. The default is already on-device — know why it matters
 
-This is the decision that shapes the whole submission, and it is easy to skip.
+Nothing is uploaded unless a user explicitly takes up an offer of a deep scan, which names the
+destination and asks first. That is what lets this listing say it collects nothing by default,
+and it means a public install costs you no compute and hands you no strangers' images.
 
-Ship with **deep scan** as the default and every stranger who installs this uploads their
-images to your deployment. You pay for the compute, you inherit whatever they scan, and the
-listing has to declare that it collects website content — which reviewers look at harder.
-
-Ship with **on-device** as the default and the extension collects nothing at all. That is now
-a real option: the face detector, the face classifier and NPR are all bundled, and parity
-against the deployed service is exact. Deep scan stays for people who self-host and point it
-at their own server.
-
-For a public listing, on-device is the better default on every axis — cost, privacy, review
-time, and how the listing reads. Change it in `src/shared/settings.ts` (`DEFAULTS.mode`) and
-in `onboarding.html` (which radio carries `checked`).
+If you change `DEFAULTS.mode` to `'server'` before publishing, revisit the privacy section
+below: every install would then upload to your deployment, and the disclosure has to lead with
+that rather than qualify it.
 
 ### 2. Register as a developer — $5, once
 

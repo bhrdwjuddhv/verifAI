@@ -12,7 +12,13 @@ import './popup.css';
 import type { Broadcast, ScanState, UiRequest, UiResponse } from '../shared/protocol';
 import type { ScanResult } from '../shared/scan-types';
 import { detectorRows, fakePercent, fmtBytes, shortUrl, NEUTRAL } from '../shared/format';
-import { getSettings, setSettings, type ScanMode } from '../shared/settings';
+import {
+  CONSENT_VERSION,
+  DEFAULT_SERVER_URL,
+  getSettings,
+  originPattern,
+  setSettings,
+} from '../shared/settings';
 import { append, clear, h } from '../ui/dom';
 
 const list = document.getElementById('scans')!;
@@ -22,6 +28,7 @@ const tabActions = document.getElementById('tab-actions')!;
 declare const __BUILD__: string;
 
 let scans: ScanState[] = [];
+let serverUrl = DEFAULT_SERVER_URL;
 
 async function ask(request: UiRequest): Promise<UiResponse> {
   return (await chrome.runtime.sendMessage(request)) as UiResponse;
@@ -39,8 +46,13 @@ chrome.runtime.onMessage.addListener((message: Broadcast) => {
  * there. The stamp is baked into every bundle of a build, so a mismatch is conclusive.
  */
 async function checkForStaleWorker(): Promise<void> {
-  const reply = (await ask({ type: 'ui:build' })) as unknown as { build?: string };
+  const reply = (await ask({ type: 'ui:build' })) as unknown as { type?: string; build?: string };
   if (reply?.build === __BUILD__) return;
+
+  // A worker that does not recognise the message at all is certainly older than this popup.
+  // Anything else that simply has no stamp cannot be judged — the preview harness, for one —
+  // and a warning there would be noise rather than a signal.
+  if (reply?.type !== 'error' && !reply?.build) return;
 
   const banner = h(
     'div',
@@ -135,46 +147,22 @@ function paint(): void {
 }
 
 /**
- * The mode switch lives here, not only in options.
+ * A status line, not a control.
  *
- * Whether a file leaves the machine is the most consequential setting in the extension, and it
- * was two clicks away in another tab — which is how someone uploads something they meant to
- * keep local. The footer also states where deep scan would send it, so the consequence of the
- * choice is visible at the moment of choosing.
+ * This was a mode switch, which put the same binary question in front of the user on every
+ * single popup open — the exact decision the redesign exists to stop asking. On-device is what
+ * the extension does; a deep scan is offered per scan where it is the better answer. All the
+ * footer owes anyone is a plain statement of what just happened, and where a file would go if
+ * they ever said yes to one.
  */
 async function paintFooter(): Promise<void> {
   const settings = await getSettings();
+  serverUrl = settings.serverUrl;
   clear(footer);
 
-  const switcher = h('div', { class: 'modes', role: 'group', 'aria-label': 'Scan mode' });
-  const options: { value: ScanMode; label: string; title: string }[] = [
-    { value: 'device', label: 'On-device', title: 'Scored here. Nothing is uploaded.' },
-    { value: 'server', label: 'Deep scan', title: `Uploads the file to ${settings.serverUrl}.` },
-  ];
-
-  for (const option of options) {
-    switcher.append(
-      h('button', {
-        class: settings.mode === option.value ? 'on' : '',
-        text: option.label,
-        title: option.title,
-        'aria-pressed': settings.mode === option.value ? 'true' : 'false',
-        onclick: async () => {
-          if (settings.mode === option.value) return;
-          await setSettings({ mode: option.value });
-          await paintFooter();
-        },
-      })
-    );
-  }
-
   footer.append(
-    switcher,
-    h('span', {
-      class: 'mono src',
-      title: settings.serverUrl,
-      text: settings.mode === 'device' ? 'nothing leaves this machine' : settings.serverUrl.replace(/^https?:\/\//, ''),
-    })
+    h('span', { text: 'Scored on this device — nothing is uploaded' }),
+    h('span', { class: 'mono src muted', title: settings.serverUrl, text: hostOf(settings.serverUrl) })
   );
 }
 
@@ -205,14 +193,7 @@ function detailCard(state: ScanState): HTMLElement {
       card.append(...resultBody(state, state.result!));
       break;
     case 'needs-consent':
-      card.append(
-        h('p', { class: 'soft', text: 'Deep scan uploads the file to your VerifAI server. Accept that once to continue.' }),
-        h('div', { class: 'actions' }, h('button', {
-          class: 'primary',
-          text: 'Review and accept',
-          onclick: () => chrome.tabs.create({ url: chrome.runtime.getURL('onboarding.html') }),
-        }))
-      );
+      card.append(...consentBody(state));
       break;
     case 'needs-permission':
       card.append(...permissionBody(state));
@@ -224,9 +205,10 @@ function detailCard(state: ScanState): HTMLElement {
         state.errorKind === 'unavailable' && state.source === 'server'
           ? h('p', { class: 'muted', text: 'The app answered, but its model service did not. No verdict is better than a guessed one.' })
           : null,
-        state.source === 'device' && state.phase === 'error'
-          ? h('p', { class: 'muted', text: 'Nothing was uploaded. Deep scan uses the server instead, if you would rather not wait for this.' })
+        state.source === 'device' && state.phase === 'error' && !state.offerServer
+          ? h('p', { class: 'muted', text: 'Nothing was uploaded.' })
           : null,
+        state.offerServer ? serverOffer(state, 'Scan every frame on the server') : null,
         h('div', { class: 'actions' },
           h('button', { text: 'Try again', onclick: () => void ask({ type: 'ui:retry', id: state.id }) })
         )
@@ -295,6 +277,70 @@ function progressBody(state: ScanState): HTMLElement {
     h('div', { class: 'bar' }, h('i', { class: 'indeterminate', style: `background:${NEUTRAL}` })),
     state.bytes ? h('p', { class: 'muted', text: `${fmtBytes(state.bytes)} read from the page` }) : null
   );
+}
+
+/**
+ * The upload confirmation, asked at the moment of upload.
+ *
+ * It used to live on the setup screen, which meant agreeing to something abstract before
+ * scanning anything. Here it names the destination, and one click covers both the consent and
+ * the host permission — which has to be requested from a page with a live gesture anyway.
+ */
+function consentBody(state: ScanState): HTMLElement[] {
+  const host = hostOf(serverUrl);
+  return [
+    h('p', {
+      class: 'soft',
+      text: `A deep scan uploads this file to ${host}, analyses it there and returns the verdict. Nothing else is sent — no page address, no history, no identifiers.`,
+    }),
+    h('p', { class: 'muted', text: 'On-device scanning uploads nothing, and stays the default.' }),
+    h(
+      'div',
+      { class: 'actions' },
+      h('button', {
+        class: 'primary',
+        text: `Upload and scan`,
+        onclick: async () => {
+          const origin = originPattern(serverUrl);
+          if (origin && !(await chrome.permissions.request({ origins: [origin] }))) return;
+          await setSettings({ consentVersion: CONSENT_VERSION });
+          await ask({ type: 'ui:rescan-server', id: state.id });
+        },
+      }),
+      h('button', {
+        text: 'Not now',
+        onclick: async () => {
+          await ask({ type: 'ui:dismiss', id: state.id });
+          scans = scans.filter((s) => s.id !== state.id);
+          paint();
+        },
+      })
+    ),
+  ];
+}
+
+/** Offered where the server genuinely does something on-device cannot. */
+function serverOffer(state: ScanState, label: string): HTMLElement {
+  return h(
+    'div',
+    { class: 'actions' },
+    h('button', {
+      text: label,
+      title: `Uploads this file to ${hostOf(serverUrl)}.`,
+      onclick: async (event: Event) => {
+        (event.currentTarget as HTMLButtonElement).disabled = true;
+        await ask({ type: 'ui:rescan-server', id: state.id });
+      },
+    })
+  );
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 
 function permissionBody(state: ScanState): HTMLElement[] {
@@ -387,7 +433,15 @@ function resultBody(state: ScanState, result: ScanResult): HTMLElement[] {
     );
   }
 
-  nodes.push(disclosure('Why this verdict', result.reasons));
+  if (state.source === 'device') {
+    nodes.push(serverOffer(state, 'Second opinion from the server'));
+  }
+
+
+  // The API appends the model's notes to `reasons` as well as sending them separately, so
+  // showing both lists whole prints every caveat twice. Measurements here, caveats below.
+  const measurements = result.reasons.filter((reason) => !result.notes.includes(reason));
+  nodes.push(disclosure('Why this verdict', measurements));
   if (result.notes.length) nodes.push(disclosure('Caveats from the model', result.notes));
 
   nodes.push(

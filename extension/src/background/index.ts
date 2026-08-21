@@ -8,7 +8,7 @@
 import type { ContentEvent, UiRequest, UiResponse } from '../shared/protocol';
 import { sendToTab } from '../shared/protocol';
 import { cacheStats, clearCache } from './cache';
-import { dismiss, explain, listScans, retry, startScan } from './scans';
+import { dismiss, explain, listScans, rescanOnServer, retry, startScan } from './scans';
 import { probeCapabilities } from '#host';
 import { autoAllowed, syncContentScripts } from './sites';
 import { REFRESH_ALARM, REFRESH_MINUTES, checkDrift, refreshManifest } from './drift';
@@ -110,9 +110,9 @@ chrome.runtime.onMessage.addListener((message: UiRequest | ContentEvent, sender,
  * Auto-scan traffic from a content script.
  *
  * Every branch re-checks `autoAllowed`, which is not redundant: a content script registered
- * for a granted site keeps running after the user switches to deep-scan mode or revokes the
- * grant, and the rule that auto-scan never uploads has to hold at the moment of the scan, not
- * at the moment of registration.
+ * for a granted site keeps running after auto-scan is switched off or the grant is revoked,
+ * and the rule has to hold at the moment of the scan rather than at the moment of
+ * registration.
  */
 /**
  * Scans the video playing in the active tab.
@@ -187,6 +187,9 @@ async function handle(message: UiRequest): Promise<UiResponse> {
       return { type: 'ok' };
     case 'ui:explain':
       await explain(message.id);
+      return { type: 'ok' };
+    case 'ui:rescan-server':
+      await rescanOnServer(message.id);
       return { type: 'ok' };
     case 'ui:dismiss':
       await dismiss(message.id);

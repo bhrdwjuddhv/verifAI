@@ -101,6 +101,11 @@ export interface StartOptions {
   inline?: { b64: string; mime: string; filename: string };
   /** Started by auto-scan. Subject to the pending cap below. */
   auto?: boolean;
+  /**
+   * Overrides the default mode for this one scan. Set when the user takes up an offer of a
+   * deep scan; unset for everything else, which follows the setting.
+   */
+  source?: 'device' | 'server';
 }
 
 /**
@@ -115,7 +120,8 @@ const MAX_AUTO_PENDING = 6;
 export async function startScan(options: StartOptions): Promise<ScanState | null> {
   const id = crypto.randomUUID();
   const settings = await getSettings();
-  const onDevice = settings.mode === 'device';
+  // Local unless this particular scan asked for the server. Nothing persists that choice.
+  const onDevice = (options.source ?? 'device') === 'device';
 
   if (options.auto) {
     await hydrate();
@@ -138,13 +144,15 @@ export async function startScan(options: StartOptions): Promise<ScanState | null
   });
 
   if (onDevice) {
-    // Video needs frame sampling, which is Phase 4. Saying so beats scoring the first bytes
-    // of an MP4 as if they were a picture.
+    // The server samples sixteen frames and averages them; locally we can only decode one,
+    // which is a different measurement rather than a worse version of the same one. Offer the
+    // server instead of pretending, or failing.
     if (options.kind === 'video') {
       return (await patch(id, {
         phase: 'error',
         errorKind: 'not-implemented',
-        error: 'On-device video scanning is not built yet. Switch to deep scan for video.',
+        error: 'Scoring a whole video means sampling frames across it, which only the server does.',
+        offerServer: true,
       }))!;
     }
     // No consent gate and no host permission for the server: nothing is uploaded.
@@ -157,8 +165,10 @@ export async function startScan(options: StartOptions): Promise<ScanState | null
     return state;
   }
 
+  // Consent is asked for here, at the moment something is about to be uploaded, rather than
+  // on a setup screen before the user has scanned anything. The popup turns this phase into a
+  // one-click confirmation naming the destination.
   if (!hasConsented(settings)) {
-    await chrome.tabs.create({ url: chrome.runtime.getURL('onboarding.html') });
     return (await patch(id, { phase: 'needs-consent' }))!;
   }
 
@@ -185,7 +195,7 @@ export async function startScan(options: StartOptions): Promise<ScanState | null
 }
 
 export async function retry(id: string): Promise<void> {
-  await rerun(id, false);
+  await rerun(id, {});
 }
 
 /**
@@ -196,10 +206,15 @@ export async function retry(id: string): Promise<void> {
  * usually empty, and re-reading costs a fraction of the 26 forward passes that follow.
  */
 export async function explain(id: string): Promise<void> {
-  await rerun(id, true);
+  await rerun(id, { explain: true });
 }
 
-async function rerun(id: string, withHeatmap: boolean): Promise<void> {
+/** Takes up the offer of a deep scan for one item, without changing the default mode. */
+export async function rescanOnServer(id: string): Promise<void> {
+  await rerun(id, { source: 'server' });
+}
+
+async function rerun(id: string, extra: Partial<StartOptions>): Promise<void> {
   await hydrate();
   const state = states.find((s) => s.id === id);
   if (!state) return;
@@ -208,7 +223,7 @@ async function rerun(id: string, withHeatmap: boolean): Promise<void> {
     kind: state.kind,
     pageUrl: state.pageUrl,
     tabId: state.tabId,
-    explain: withHeatmap,
+    ...extra,
   });
   await dismiss(id);
 }

@@ -134,15 +134,4 @@ footer {
   color: var(--text-faint);
 }
 
-.modes { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
-.modes button {
-  border: none;
-  border-radius: 0;
-  background: transparent;
-  padding: 4px 9px;
-  font-size: 11px;
-  color: var(--text-faint);
-}
-.modes button + button { border-left: 1px solid var(--line); }
-.modes button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
-.modes button:not(.on):hover { color: var(--text); }
+.pill-warn { color: #FBBF24; }

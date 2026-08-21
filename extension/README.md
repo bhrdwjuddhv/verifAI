@@ -18,94 +18,66 @@ All five build phases are implemented. The status table below is the current sta
 | 4 — Feeds, Shorts, Reels | **built** — off by default, on-device only |
 | 5 — Firefox target, store packaging | **done** — see [STORE.md](STORE.md) |
 
-Both scan modes work. Deep scan uploads to your VerifAI server; on-device decodes and scores
-locally and uploads nothing. A detector that is not bundled **abstains and says so** in the
-verdict's notes — it is never replaced by a guess.
+**Scans run on your machine.** The three bundled detectors are the same ones the server runs,
+and parity against it is exact on still images — so there is no trade to weigh and nothing to
+choose. Deep scan is not a second mode you live in; it is offered per scan where the server
+genuinely does more (sampling every frame of a video), and it asks first, naming the
+destination. A detector that cannot apply **abstains and says so** — it is never replaced by
+a guess.
 
-## Build and load
+## Running it on your machine
+
+**You need:** Node 20+, and Python 3.10+ with two packages. Python is used once, to convert the
+NPR detector — the model is published only as a PyTorch checkpoint, but the converter here
+needs neither PyTorch nor Docker.
+
+```bash
+pip install numpy onnx
+```
+
+Then, from the repo root:
 
 ```bash
 cd extension && npm install && npm run models && npm run build
 ```
 
-`npm run models` fetches the detectors the deployed service uses (see
-[fetch-models.mjs](scripts/fetch-models.mjs)); weights are copied into `dist/` at build time
-rather than committed here.
+`npm run models` fetches the two detectors that are not in git — YuNet and NPR — from the same
+URLs `scripts/Dockerfile` already uses to provision the server, and converts NPR to ONNX. The
+face classifier is committed, so it needs nothing. Expect about 6MB of downloads.
 
-Then in Chrome: `chrome://extensions` → enable **Developer mode** → **Load unpacked** →
-select `extension/dist`.
+Load it in Chrome:
 
-First run opens a setup page that asks one thing: **where scans run**. On-device is the
-default and needs no permission at all — nothing leaves the machine, so there is nothing to
-grant. Choosing deep scan reveals the server field (default `https://verif-ai-blue.vercel.app`;
-point it at `http://localhost:3000` for development) and asks Chrome for access to that one
-address. The page describes what is actually bundled by reading the build's own model
-manifest, so it cannot claim a detector that is not in the package.
+1. Open `chrome://extensions`
+2. Turn on **Developer mode** (top right)
+3. **Load unpacked** → select `extension/dist` — the folder itself, not a file inside it
 
-Firefox build: `npm run build:firefox`, then load `dist/manifest.json` via `about:debugging`.
+Confirm it worked: open the extension's **Options** and press **Probe this machine**. It should
+report `WebAssembly: allowed` and a backend of `webgpu` or `wasm`. If WebAssembly says blocked,
+the manifest has not been re-read — press reload on the extension card.
 
-## On-device mode
+Then right-click any image and choose **Verify with VerifAI**.
 
-Everything runs in an offscreen document — the only extension context with `navigator.gpu`
-and a lifetime longer than the service worker's ~30s idle eviction.
+### After you change anything
 
-| | |
+```bash
+npm run build
+```
+
+then press **reload** on the extension card. Chrome picks up rebuilt code on its own for some
+surfaces but **never** re-reads `manifest.json` without that reload — which is how a
+permission or CSP change appears to do nothing. If the popup and the background worker ever
+fall out of step, the popup says so in an amber banner rather than failing mysteriously.
+
+### If something looks wrong
+
+| Symptom | Cause |
 |---|---|
-| Backend | WebGPU when an adapter exists, wasm otherwise |
-| Threads | **none** — extension pages get no cross-origin isolation, so no `SharedArrayBuffer` |
-| Face detector | YuNet ONNX, letterboxed into its fixed 640×640 input |
-| Face classifier | the repo's `detector.onnx`, fp32, flip-TTA, T=0.7193 |
-| NPR | not bundled yet — needs a torch export, see `npm run models` |
-| Measured | 3.7s cold (21MB wasm + 16MB session), 1.0–1.4s warm, on a 512×384 PNG |
+| `WebAssembly: blocked` in the probe | The manifest was not re-read. Reload the extension. |
+| "does not handle …" on a button | Same thing: the worker is older than the popup. |
+| `Extension context invalidated` in the error log | Scripts orphaned by a *previous* reload. Refresh the affected tabs; they stop on their own. |
+| On-device verdict says a detector is missing | `npm run models` did not finish — re-run it and check the Python step. |
 
-**The manifest must allow WebAssembly.** MV3's default `script-src 'self'` blocks
-`WebAssembly.instantiate` itself, so the manifest declares
-`script-src 'self' 'wasm-unsafe-eval'`. Avoiding `eval` in the JavaScript is necessary but not
-sufficient — without that token every on-device scan fails with a `CompileError` and no model
-loads at all. `scripts/preview.mjs` serves its harness pages under the manifest's own CSP for
-exactly this reason: a harness on a permissive localhost policy will happily run WebAssembly
-the real extension is forbidden to compile, and that gap let this reach a user once already.
-
-Parity with the server is the point, and three pieces exist only to protect it:
-
-- **[resample.ts](src/shared/resample.ts)** is a port of Pillow's `Resample.c` — the same
-  triangle filter with support scaled by the reduction factor, the same 22-bit fixed-point
-  coefficients, the same clip to uint8 between passes. A canvas `drawImage` downscale is a
-  different filter, and the difference is several points of fused score.
-- **[detect.ts](src/shared/detect.ts)** ports the fusion, verdict bands, label mapping and
-  frequency score literally, including the renormalisation that stops a missing detector
-  voting "50".
-- **`createImageBitmap(..., { imageOrientation: 'none' })`**, because the browser applies EXIF
-  rotation by default and `PIL.Image.open` does not.
-
-Two known divergences, both documented in the code: YuNet runs at a fixed 640×640 here while
-the service detects at native resolution, and NPR does not vote until it is exported.
-
-## Explaining a score
-
-Grad-CAM needs gradients and ONNX Runtime is forward-only, so on-device explanation is
-**occlusion saliency** — the same thing the service's own torch-free path does. Each of 25
-patches is hidden in turn and the drop in P(fake) measured; the map is what the model
-*depended on*, not what it activated on. The popup labels which method produced a heatmap, so
-an on-device map is never passed off as Grad-CAM.
-
-It is an explicit **"Explain this score"** button, not something every scan pays for: 26
-forward passes, measured at **897ms on CPU** via onnxruntime-node. WebGPU is faster; the popup
-prints the real figure next to every on-device result.
-
-Three details are ported literally from `occlusion_overlay` and `encode_overlay`, and all
-three are the difference between an honest picture and a plausible one:
-
-- patches are filled with **0 after normalisation** — the dataset mean, i.e. "no information",
-  not a black square, which would itself be a strong feature;
-- a peak of zero returns **null**. If hiding any region leaves the score unchanged there is
-  nothing honest to draw, and the note says exactly that;
-- the blend is weighted by the map itself (`weight = alpha * cam`), so cold regions are left
-  untouched rather than washed flat.
-
-The overlay covers the **face crop**, not the whole photo — the same as the server. It is
-never stretched across the original image, because that would be a silent lie about where the
-model looked.
+Firefox: `npm run build:firefox`, then load `dist/manifest.json` via `about:debugging`.
 
 ## Video, Shorts and Reels
 
