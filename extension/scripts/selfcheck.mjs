@@ -263,11 +263,17 @@ section('overlay rendering (encode_overlay parity)');
 // ---------------------------------------------------------------------------------------
 
 section('face classifier (real ONNX)');
-const faceOnnx = path.join(models, 'face', 'detector.onnx');
+// Newest first, matching scripts/build.mjs and the service's config.first_existing(). A
+// selfcheck that tests a different file from the one shipped is worse than no selfcheck.
+const faceOnnx = [
+  path.join(models, 'face', 'detector_v2.onnx'),
+  path.join(models, 'face', 'detector.onnx'),
+].find((candidate) => fs.existsSync(candidate)) ?? path.join(models, 'face', 'detector.onnx');
 if (!fs.existsSync(faceOnnx)) {
   console.log('  skipped — models/face/detector.onnx is absent');
 } else {
-  const meta = JSON.parse(fs.readFileSync(path.join(models, 'face', 'detector.json'), 'utf8'));
+  // The meta always sits beside its ONNX, so the pair cannot drift apart.
+  const meta = JSON.parse(fs.readFileSync(faceOnnx.replace(/\.onnx$/, '.json'), 'utf8'));
   const session = await ort.InferenceSession.create(faceOnnx);
 
   const image = checkerboard(320, 8);
