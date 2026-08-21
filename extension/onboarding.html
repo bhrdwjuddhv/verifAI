@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VerifAI — set up</title>
+  </head>
+  <body class="page">
+    <main class="wrap" id="setup">
+      <header class="hero">
+        <img src="icons/icon-128.png" width="44" height="44" alt="" />
+        <h1>Two decisions, then you're done</h1>
+        <p class="soft">
+          VerifAI checks whether an image was AI-generated or manipulated, and shows you which
+          detector said so. Choose where that runs — it decides whether anything leaves this
+          machine.
+        </p>
+      </header>
+
+      <section class="card">
+        <h2><span class="step">1</span> Where scans run</h2>
+
+        <label class="choice" for="mode-device">
+          <input type="radio" name="mode" id="mode-device" value="device" checked />
+          <span class="choice-body">
+            <span class="choice-title">On this device <span class="tag">nothing uploads</span></span>
+            <span class="choice-note" id="device-detail">Checking what is bundled…</span>
+          </span>
+        </label>
+
+        <label class="choice" for="mode-server">
+          <input type="radio" name="mode" id="mode-server" value="server" />
+          <span class="choice-body">
+            <span class="choice-title">Deep scan <span class="tag">uploads the file</span></span>
+            <span class="choice-note">
+              The image is sent to the VerifAI server you name below, analysed there, and the
+              verdict comes back. The server runs more detectors than this build bundles, so it
+              catches more — at the cost of the file leaving your machine. Nothing else is sent:
+              no page address, no history, no identifiers, and there are no analytics.
+            </span>
+          </span>
+        </label>
+
+        <p class="muted">You can change this any time, per scan mode, in options.</p>
+      </section>
+
+      <section class="card" id="server-step" hidden>
+        <h2><span class="step">2</span> Which server</h2>
+        <label class="field">
+          <span>VerifAI origin</span>
+          <input type="url" id="server" placeholder="https://verif-ai-blue.vercel.app" spellcheck="false" />
+        </label>
+        <p class="muted">
+          The default is the public instance. Point it at your own deployment, or at
+          <code>http://localhost:3000</code> if you are running it yourself. Accepting will ask
+          Chrome for permission to reach that one address.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>What a verdict actually means</h2>
+        <p class="soft">
+          A "real" verdict means the detectors found nothing — <b>not</b> that the file is
+          authentic. Accuracy against generators the models have never seen is not yet measured,
+          and confidence is uncalibrated. Every scan shows which detectors voted, their weights
+          and the model that produced them, so you can judge the number rather than trust it.
+        </p>
+        <p class="soft">
+          A detector that is missing abstains and says so. It is never replaced by a guess.
+        </p>
+      </section>
+
+      <div class="actions">
+        <button class="primary" id="accept">Accept and start scanning</button>
+        <span class="muted" id="status"></span>
+      </div>
+    </main>
+
+    <main class="wrap" id="done" hidden>
+      <header class="hero">
+        <div class="done-mark" aria-hidden="true">✓</div>
+        <h1>You're set up</h1>
+        <p class="soft" id="done-summary"></p>
+      </header>
+
+      <section class="card">
+        <h2>Try it now</h2>
+        <ol class="steps">
+          <li>Find any image on any page — a photo in a feed, a search result, a message.</li>
+          <li>Right-click it and choose <b>Verify with VerifAI</b>.</li>
+          <li>A badge appears on the image. Click the toolbar icon for the full breakdown.</li>
+        </ol>
+      </section>
+
+      <div class="actions">
+        <button class="primary" id="open-options">Open options</button>
+        <button id="close-tab">Close this tab</button>
+      </div>
+    </main>
+
+    <script type="module" src="/src/onboarding/index.ts"></script>
+  </body>
+</html>

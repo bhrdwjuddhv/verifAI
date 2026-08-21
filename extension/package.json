@@ -1,0 +1,29 @@
+{
+  "name": "verifai-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "VerifAI browser extension \u2014 verify images and video in place.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:firefox": "node scripts/build.mjs --target=firefox",
+    "watch": "node scripts/build.mjs --watch",
+    "icons": "node scripts/gen-icons.mjs",
+    "typecheck": "tsc --noEmit",
+    "selfcheck": "node scripts/selfcheck.mjs",
+    "models": "node scripts/fetch-models.mjs",
+    "parity:capture": "node scripts/parity-capture.mjs",
+    "parity": "node scripts/preview.mjs",
+    "pack": "node scripts/pack.mjs",
+    "pack:firefox": "node scripts/pack.mjs --target=firefox"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "onnxruntime-node": "1.20.1",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.11"
+  },
+  "dependencies": {
+    "onnxruntime-web": "1.20.1"
+  }
+}

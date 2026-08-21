@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VerifAI options</title>
+  </head>
+  <body class="page">
+    <main class="wrap">
+      <header class="hero">
+        <h1>VerifAI options</h1>
+        <p class="soft">Where scans run, which server they go to, and what is cached on this machine.</p>
+      </header>
+
+      <section class="card">
+        <h2>Scan mode</h2>
+        <label class="field">
+          <span>How images are analysed</span>
+          <select id="mode">
+            <option value="server">Deep scan — upload to the VerifAI server</option>
+            <option value="device">On-device — never uploads</option>
+          </select>
+        </label>
+        <p class="muted" id="mode-note"></p>
+      </section>
+
+      <section class="card">
+        <h2>Server</h2>
+        <div class="field-row">
+          <label class="field">
+            <span>VerifAI origin</span>
+            <input type="url" id="server" spellcheck="false" placeholder="https://verif-ai-blue.vercel.app" />
+          </label>
+          <button id="save">Save</button>
+          <button id="test">Test</button>
+        </div>
+        <p class="muted" id="server-status"></p>
+        <hr class="divider" />
+        <p class="soft">
+          On-device scans use a bundled copy of the server's thresholds and fusion weights.
+          This checks they still match — if the server is retuned and this build is not, an
+          on-device score stops meaning what a deep scan of the same image would.
+        </p>
+        <dl class="kv" id="drift-info"></dl>
+        <div class="actions">
+          <button id="check-drift">Check against the server</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Cache</h2>
+        <p class="soft">
+          Verdicts are cached by the SHA-256 of the file bytes, so re-checking the same image costs
+          nothing and sends nothing. Heatmaps are kept separately under a 3MB budget.
+        </p>
+        <dl class="kv" id="cache-stats"></dl>
+        <div class="actions">
+          <button id="clear-cache">Clear cached verdicts</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Consent</h2>
+        <p class="soft" id="consent-state"></p>
+        <div class="actions">
+          <button id="review-consent">Review the consent screen</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Auto-scan feeds</h2>
+        <p class="soft">
+          Watches Shorts and Reels as you scroll and scores what appears. Off by default, and
+          it <b>only ever runs on-device</b> — auto-uploading whatever you scroll past is not
+          something this extension will do, so switching to deep scan turns it off.
+        </p>
+        <label class="check">
+          <input type="checkbox" id="auto-scan" />
+          <span>Scan feeds automatically</span>
+        </label>
+        <p class="muted" id="auto-note"></p>
+        <div id="sites" class="sites"></div>
+      </section>
+
+      <section class="card">
+        <h2>On-device engine</h2>
+        <p class="soft">
+          What this machine can actually run. Measured here, not assumed — the answer decides
+          whether an explanation heatmap is instant or takes seconds.
+        </p>
+        <dl class="kv" id="engine-info"></dl>
+        <div class="actions">
+          <button id="probe">Probe this machine</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Build</h2>
+        <dl class="kv" id="build-info"></dl>
+      </section>
+    </main>
+
+    <script type="module" src="/src/options/index.ts"></script>
+  </body>
+</html>

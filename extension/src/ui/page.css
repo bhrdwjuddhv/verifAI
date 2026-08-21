@@ -1,0 +1,113 @@
+/* Full-page chrome for the onboarding and options tabs. */
+
+body.page {
+  padding: 40px 24px 80px;
+}
+
+.wrap {
+  max-width: 660px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.hero { display: flex; flex-direction: column; gap: 10px; }
+.hero img { border-radius: 10px; }
+.hero h1 { font-size: 24px; letter-spacing: -0.02em; }
+.hero p { max-width: 60ch; margin: 0; }
+
+.card { display: flex; flex-direction: column; gap: 8px; padding: 16px 18px; }
+.card h2 { font-size: 14px; }
+.card p { margin: 0; max-width: 62ch; }
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > span { font-size: 12px; color: var(--text-soft); }
+
+.field-row { display: flex; gap: 8px; align-items: flex-end; }
+.field-row .field { flex: 1; }
+
+.actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+.divider { height: 1px; background: var(--line); border: 0; margin: 4px 0; }
+
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12px; }
+.kv dt { color: var(--text-faint); }
+.kv dd { margin: 0; }
+
+/* Step markers only appear where the order is real — you cannot pick a server before
+   choosing a mode that needs one. */
+.step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 700;
+  margin-right: 8px;
+  vertical-align: 1px;
+}
+
+.choice {
+  display: flex;
+  gap: 11px;
+  align-items: flex-start;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+  background: var(--surface-2);
+}
+.choice + .choice { margin-top: 8px; }
+.choice:hover { border-color: #333D50; }
+.choice.selected { border-color: var(--accent); background: rgba(168, 216, 240, 0.06); }
+.choice input { margin-top: 2px; accent-color: var(--accent); width: 15px; height: 15px; flex: none; }
+.choice-body { display: flex; flex-direction: column; gap: 4px; }
+.choice-title { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.choice-note { color: var(--text-soft); font-size: 12.5px; line-height: 1.5; }
+
+.done-mark {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(52, 211, 153, .12);
+  border: 1px solid rgba(52, 211, 153, .4);
+  color: #34D399;
+  font-size: 20px;
+}
+
+.steps { margin: 0; padding-left: 20px; color: var(--text-soft); display: flex; flex-direction: column; gap: 7px; }
+.steps b { color: var(--text); }
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .9em;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: .05em .35em;
+}
+
+.check { display: flex; align-items: center; gap: 9px; cursor: pointer; }
+.check input { width: 15px; height: 15px; accent-color: var(--accent); }
+
+.sites { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.site-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+.site-row .stack { gap: 2px; }
+.site-row .muted { font-size: 11.5px; }
+
+.pill-ok { color: #34D399; }
+.pill-bad { color: #FCA5A5; }

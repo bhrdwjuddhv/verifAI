@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>VerifAI feed harness</title>
+    <style>
+      body { margin: 0; padding: 18px; background: #0A0C12; color: #E6E8EF;
+             font: 13px/1.5 ui-sans-serif, system-ui, sans-serif; }
+      h1 { font-size: 16px; margin: 0 0 10px; }
+      #log { white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+             border: 1px solid #232936; border-radius: 8px; padding: 12px; background: #12151D; }
+      .pass { color: #10B981; } .fail { color: #EF4444; } .muted { color: #6F7789; }
+      .feed { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+      .feed img, .feed video { display: block; background: #1C2130; border-radius: 6px; }
+      #post { width: 150px; height: 150px; }
+      #avatar { width: 150px; height: 150px; }
+      #icon { width: 150px; height: 150px; }
+      #thumb { width: 50px; height: 50px; }
+      #player { width: 240px; height: 180px; }
+    </style>
+  </head>
+  <body>
+    <h1>Feed discovery harness</h1>
+    <div id="log">setting up…</div>
+
+    <!-- A deliberately mixed feed. Only #post and #player are content; the rest are the
+         things a generic discoverer has to reject without knowing this site. -->
+    <div class="feed">
+      <img id="post" alt="post" />
+      <img id="avatar" alt="avatar" />
+      <img id="icon" src="/icons/icon-128.png" alt="icon" />
+      <img id="thumb" alt="thumb" />
+      <video id="player" muted playsinline></video>
+    </div>
+
+    <script>
+      // The content bundle talks to the worker; capture what it would have sent.
+      window.__sent = [];
+      window.chrome = {
+        runtime: {
+          // Present exactly as in a live content script; Chrome clears it when the extension
+          // is reloaded, which is how an orphaned script can tell.
+          id: 'harness-extension-id',
+          getURL: (p) => '/' + p,
+          onMessage: { addListener: (fn) => { window.__contentListener = fn; } },
+          sendMessage: (msg) => {
+            window.__sent.push(msg);
+            // auto:hello is answered "enabled" so the bundle starts watching immediately.
+            return Promise.resolve(msg && msg.type === 'auto:hello' ? { enabled: true } : { ok: true });
+          },
+        },
+      };
+    </script>
+    <script src="/content.js"></script>
+    <script type="module">
+      const log = document.getElementById('log');
+      let pass = 0, fail = 0;
+      const line = (ok, text) => {
+        const div = document.createElement('div');
+        div.className = ok ? 'pass' : 'fail';
+        div.textContent = (ok ? '  ok    ' : '  FAIL  ') + text;
+        log.appendChild(div);
+        ok ? pass++ : fail++;
+      };
+      const note = (text) => {
+        const div = document.createElement('div');
+        div.className = 'muted';
+        div.textContent = text;
+        log.appendChild(div);
+      };
+      log.textContent = '';
+
+      const png = (w, h, colour) => {
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const x = c.getContext('2d');
+        x.fillStyle = colour; x.fillRect(0, 0, w, h);
+        return c.toDataURL('image/png');
+      };
+
+      const ready = (img) => new Promise((r) => { img.onload = r; img.onerror = r; });
+
+      const post = document.getElementById('post');
+      const avatar = document.getElementById('avatar');
+      const thumb = document.getElementById('thumb');
+      post.src = png(200, 200, '#7799bb');      // content: big enough both ways
+      avatar.src = png(40, 40, '#bb7799');      // 40px asset blown up to 150 — an avatar
+      thumb.src = png(200, 200, '#99bb77');     // real asset rendered at 50px — a thumbnail
+      await Promise.all([ready(post), ready(avatar), ready(thumb)]);
+
+      // A live video with no file: a canvas stream gives a real, readable <video>.
+      const stage = document.createElement('canvas');
+      stage.width = 320; stage.height = 240;
+      const sctx = stage.getContext('2d');
+      let hue = 0;
+      const paint = () => {
+        sctx.fillStyle = `hsl(${hue}, 60%, 45%)`;
+        sctx.fillRect(0, 0, 320, 240);
+        sctx.fillStyle = '#fff';
+        sctx.fillRect(20 + (hue % 200), 90, 60, 60);
+      };
+      paint();
+      const player = document.getElementById('player');
+      player.srcObject = stage.captureStream(12);
+      await player.play().catch(() => {});
+
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const sent = () => window.__sent;
+      const images = () => sent().filter((m) => m.type === 'auto:image');
+      const frames = () => sent().filter((m) => m.type === 'auto:frame');
+
+      note('waiting for discovery…');
+      await sleep(1200);
+
+      // --- image discovery -----------------------------------------------------------
+      const urls = images().map((m) => m.url);
+      line(urls.some((u) => u === post.currentSrc), 'the 200px content image is discovered');
+      line(!urls.some((u) => u === avatar.currentSrc), 'a 40px asset upscaled to 150px is rejected');
+      line(!urls.some((u) => u === thumb.currentSrc), 'a real asset rendered at 50px is rejected');
+      line(!urls.some((u) => u.includes('/icons/')), 'an /icons/ URL is rejected regardless of size');
+      line(images().length === 1, `exactly one image candidate, got ${images().length}`);
+
+      // --- frame capture ---------------------------------------------------------------
+      const first = frames().length;
+      line(first >= 1, `a frame was captured from the playing video (${first})`);
+      if (first) {
+        const f = frames()[0];
+        line(f.mime === 'image/png', 'frames are PNG, not re-encoded as JPEG');
+        line(typeof f.dedupeKey === 'string' && f.dedupeKey.length === 64, 'each frame carries a SHA-256 dedupe key');
+        line(f.b64.length > 100, `frame carries bytes (${Math.round(f.b64.length / 1024)}KB base64)`);
+      }
+
+      // --- dedupe: a static shot must not be scanned four times ------------------------
+      note('holding the picture still for 4s…');
+      await sleep(4000);
+      line(frames().length === first, `a still frame is not rescanned (${frames().length} total)`);
+
+      // --- recycled player: same element, different clip --------------------------------
+      note('swapping the clip on the same <video> element…');
+      hue = 200; paint();
+      player.dispatchEvent(new Event('loadstart'));
+      await sleep(1500);
+      const afterSwap = frames().length;
+      line(afterSwap > first, `a recycled player is rescanned after loadstart (${afterSwap} total)`);
+
+      // --- badges: one per element, and no pile ---------------------------------------
+      // Scrolling a feed used to leave a badge per scanned frame, and once a recycled player
+      // swapped source they all parked in the same corner. These assertions are that bug.
+      const badgeHosts = () =>
+        [...document.documentElement.children].filter(
+          (el) => el.tagName === 'DIV' && el.style.zIndex === '2147483647'
+        ).length;
+
+      const sendBadge = (state) =>
+        new Promise((r) => window.__contentListener({ type: 'content:badge', state }, null, r));
+
+      const baseState = (over) => ({
+        id: 'scan-' + Math.random(),
+        createdAt: Date.now(),
+        kind: 'image',
+        source: 'device',
+        phase: 'scanning',
+        ...over,
+      });
+
+      const before = badgeHosts();
+
+      // Four frames of one clip is what auto-scan actually produces per Short.
+      for (let i = 0; i < 4; i++) await sendBadge(baseState({ mediaUrl: post.currentSrc, auto: true }));
+      line(badgeHosts() === before + 1,
+        `four scans of one element make one badge, got ${badgeHosts() - before}`);
+
+      // An auto scan whose element is gone described something already scrolled past.
+      await sendBadge(baseState({ mediaUrl: 'https://nowhere.invalid/gone.png', auto: true }));
+      line(badgeHosts() === before + 1,
+        `an unanchored auto badge is dropped, not parked in the corner (${badgeHosts() - before})`);
+
+      // A manual scan was explicitly asked for, so it still gets an answer.
+      await sendBadge(baseState({ mediaUrl: 'https://nowhere.invalid/gone.png', auto: false }));
+      line(badgeHosts() === before + 2,
+        `an unanchored manual badge still shows (${badgeHosts() - before})`);
+
+      // And a long scroll cannot outrun the cap.
+      const extras = [];
+      for (let i = 0; i < 8; i++) {
+        const img = document.createElement('img');
+        img.src = png(200, 200, `hsl(${i * 40}, 50%, 50%)`);
+        img.style.cssText = 'width:120px;height:120px';
+        document.querySelector('.feed').appendChild(img);
+        await ready(img);
+        extras.push(img);
+        await sendBadge(baseState({ mediaUrl: img.currentSrc, auto: true }));
+      }
+      line(badgeHosts() <= 5, `badges stay capped while scrolling, got ${badgeHosts()}`);
+
+      // --- an extension reload must not leave the page sampling forever ----------------
+      note('simulating an extension reload…');
+      const framesBefore = frames().length;
+      delete window.chrome.runtime.id;   // exactly what Chrome does to an orphaned script
+      await sleep(4500);                 // longer than the 3s sampling interval
+
+      line(frames().length === framesBefore,
+        `an orphaned script stops sampling (${frames().length - framesBefore} sent after the reload)`);
+      line(badgeHosts() === 0,
+        `an orphaned script takes its badges down (${badgeHosts()} left)`);
+
+      const summary = document.createElement('div');
+      summary.className = fail ? 'fail' : 'pass';
+      summary.textContent = `\n${fail ? 'FAILED' : 'passed'} — ${pass}/${pass + fail} assertions`;
+      log.appendChild(summary);
+      document.title = fail ? `FEED FAILED ${pass}/${pass + fail}` : `FEED OK ${pass}/${pass + fail}`;
+    </script>
+  </body>
+</html>

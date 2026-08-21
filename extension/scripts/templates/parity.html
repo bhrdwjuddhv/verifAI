@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>VerifAI parity</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0; padding: 28px;
+        background: #0A0C12; color: #E6E8EF;
+        font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      h1 { font-size: 18px; margin: 0 0 4px; letter-spacing: -0.01em; }
+      .sub { color: #6F7789; margin: 0 0 20px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+      table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+      th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #1C2130; white-space: nowrap; }
+      th { color: #6F7789; font-weight: 500; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
+      td.num { font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+      .pass { color: #10B981; }
+      .fail { color: #EF4444; }
+      .skip { color: #F59E0B; }
+      .muted { color: #6F7789; }
+      .summary { margin: 22px 0 0; padding: 14px 16px; border: 1px solid #232936; border-radius: 10px; background: #12151D; }
+      .summary b { font-size: 15px; }
+      .note { color: #A3AAB9; margin: 6px 0 0; max-width: 78ch; }
+    </style>
+  </head>
+  <body>
+    <h1>On-device vs server</h1>
+    <p class="sub" id="head">loading fixtures…</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Fixture</th><th>Face</th><th>NPR</th><th>Freq</th>
+          <th>Fused</th><th>Δ</th><th>Verdict</th><th>Face?</th><th>ms</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+
+    <div class="summary" id="summary"></div>
+
+    <script>
+      // Enough of chrome.* for the real offscreen bundle to run in an ordinary tab.
+      window.__verifaiStub = true;
+      window.chrome = {
+        runtime: {
+          getURL: (p) => '/' + p,
+          onMessage: { addListener: () => {} },
+        },
+      };
+    </script>
+    <script type="module" src="/assets/offscreen.js"></script>
+    <script type="module">
+      const TOLERANCE = 2; // PLAN.md: |fused_ondevice − fused_server| ≤ 2
+
+      const rows = document.getElementById('rows');
+      const head = document.getElementById('head');
+      const summary = document.getElementById('summary');
+
+      const send = (message) =>
+        new Promise((resolve) => {
+          const fn = window.__verifaiHandler;
+          if (!fn) return resolve({ ok: false, error: 'the offscreen bundle registered no listener' });
+          fn(message, null, resolve);
+        });
+
+      const cell = (text, cls) => {
+        const td = document.createElement('td');
+        td.textContent = text;
+        if (cls) td.className = cls;
+        return td;
+      };
+
+      const pct = (v) => (v === null || v === undefined ? '—' : String(Math.round(v)));
+
+      // "42 / 42" reads at a glance; "42 / absent" is the case that matters most, because it
+      // means one side has a detector the other does not and the fused scores cannot be compared.
+      const pair = (a, b) => `${pct(a)} / ${b === null || b === undefined ? 'absent' : pct(b)}`;
+
+      const load = await fetch('/parity-fixtures.json').then((r) => (r.ok ? r.json() : null));
+      if (!load) {
+        head.textContent = 'No dist/parity-fixtures.json — run `npm run parity:capture` first.';
+      } else {
+        head.textContent = `${load.fixtures.length} fixtures · server ${load.server} · captured ${new Date(load.capturedAt).toLocaleString()}`;
+
+        const caps = await send({ type: 'offscreen:probe' });
+        let pass = 0, fail = 0, skip = 0;
+        const detectorGaps = new Set();
+
+        for (const fixture of load.fixtures) {
+          const tr = document.createElement('tr');
+          tr.appendChild(cell(fixture.file));
+
+          if (!fixture.ok) {
+            tr.appendChild(cell(`server refused: ${fixture.error}`, 'skip'));
+            tr.querySelector('td:last-child').colSpan = 9;
+            rows.appendChild(tr);
+            skip++;
+            continue;
+          }
+
+          const started = performance.now();
+          const out = await send({
+            type: 'offscreen:score',
+            b64: fixture.b64,
+            filename: fixture.file,
+            mime: fixture.mime,
+          });
+          const ms = Math.round(performance.now() - started);
+
+          if (!out || !out.ok) {
+            tr.appendChild(cell(`device failed: ${out && out.error}`, 'fail'));
+            tr.querySelector('td:last-child').colSpan = 9;
+            rows.appendChild(tr);
+            fail++;
+            continue;
+          }
+
+          const ref = fixture.reference;
+          const dev = out.result;
+          const sFused = ref.score === null ? null : 100 - ref.score;
+          const dFused = dev.score === null ? null : 100 - dev.score;
+
+          // A detector present on one side only makes the fused numbers incomparable by
+          // construction. Reporting that as a failure would hide the real one.
+          const gaps = [];
+          for (const key of ['modelScore', 'nprScore']) {
+            const s = ref.signals[key] ?? null;
+            const d = dev.signals[key] ?? null;
+            if ((s === null) !== (d === null)) {
+              gaps.push(`${key === 'modelScore' ? 'face' : 'npr'} ${s === null ? 'device-only' : 'server-only'}`);
+              detectorGaps.add(key === 'modelScore' ? 'face' : 'npr');
+            }
+          }
+
+          const delta = sFused === null || dFused === null ? null : Math.abs(sFused - dFused);
+          const verdictMatch = ref.verdict.category === dev.verdict.category;
+          const faceMatch = ref.signals.faceDetected === dev.signals.faceDetected;
+
+          let status, cls;
+          if (gaps.length) {
+            status = gaps.join(', ');
+            cls = 'skip';
+            skip++;
+          } else if (delta !== null && delta <= TOLERANCE && verdictMatch && faceMatch) {
+            status = 'pass';
+            cls = 'pass';
+            pass++;
+          } else {
+            status = [
+              delta === null ? 'no fused score' : delta > TOLERANCE ? `Δ${delta} > ${TOLERANCE}` : null,
+              verdictMatch ? null : 'verdict differs',
+              faceMatch ? null : 'faceDetected differs',
+            ].filter(Boolean).join(', ');
+            cls = 'fail';
+            fail++;
+          }
+
+          tr.appendChild(cell(pair(ref.signals.modelScore, dev.signals.modelScore), 'num'));
+          tr.appendChild(cell(pair(ref.signals.nprScore, dev.signals.nprScore), 'num'));
+          tr.appendChild(cell(pair(ref.signals.frequencyScore, dev.signals.frequencyScore), 'num'));
+          tr.appendChild(cell(pair(sFused, dFused), 'num'));
+          tr.appendChild(cell(delta === null ? '—' : String(delta), delta !== null && delta > TOLERANCE ? 'num fail' : 'num'));
+          tr.appendChild(cell(`${ref.verdict.shortLabel} / ${dev.verdict.shortLabel}`, verdictMatch ? '' : 'fail'));
+          tr.appendChild(cell(`${ref.signals.faceDetected} / ${dev.signals.faceDetected}`, faceMatch ? 'muted' : 'fail'));
+          tr.appendChild(cell(String(ms), 'num muted'));
+          tr.appendChild(cell(status, cls));
+          rows.appendChild(tr);
+        }
+
+        const verdictLine = fail === 0 && pass > 0 ? 'PARITY GREEN' : fail > 0 ? 'PARITY RED' : 'NOTHING COMPARABLE';
+        summary.innerHTML = '';
+        const b = document.createElement('b');
+        b.textContent = `${verdictLine} — ${pass} pass, ${fail} fail, ${skip} not comparable`;
+        b.className = fail ? 'fail' : pass ? 'pass' : 'skip';
+        summary.appendChild(b);
+
+        const engine = document.createElement('p');
+        engine.className = 'note mono';
+        engine.textContent = `backend ${caps && caps.backend} · webgpu ${caps && caps.webgpu} · threads ${caps && caps.sharedArrayBuffer}`;
+        summary.appendChild(engine);
+
+        if (detectorGaps.size) {
+          const note = document.createElement('p');
+          note.className = 'note';
+          note.textContent =
+            `Not comparable because these detectors exist on only one side: ${[...detectorGaps].join(', ')}. ` +
+            'Fused scores are weighted means over whichever detectors ran, so comparing them across a ' +
+            'detector gap measures the gap, not the port. Export the missing model and re-run.';
+          summary.appendChild(note);
+        }
+
+        document.title = `${verdictLine} · ${pass}/${pass + fail}`;
+      }
+    </script>
+  </body>
+</html>
