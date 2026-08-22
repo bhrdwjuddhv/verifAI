@@ -49,8 +49,28 @@ REAL_BELOW = float(os.environ.get("VERIFAI_REAL_BELOW", "30"))
 
 # NPR (Tan et al., CVPR 2024): whole-image AI-generation detector. Complements the face
 # classifier, which only sees face swaps and misses fully generated faces entirely.
-NPR_CHECKPOINT = os.environ.get("VERIFAI_NPR_CHECKPOINT", os.path.join("models", "npr_detector.pth"))
-NPR_MODEL_PATH = os.environ.get("NPR_MODEL_PATH", os.path.join("models", "npr_detector.onnx"))
+#
+# Two are installed, and the ORDER here is a measurement, not a preference:
+#
+#   models/npr_detector.onnx        the authors' ProGAN-trained weights. On four hand-checked
+#                                   images: real 0%/0%, AI 100%/100% — decisive both ways.
+#   models/images/npr_detector.onnx trained here. Same four images: 55%/53% real, 67%/61% AI.
+#                                   It ranks them correctly but every score lands inside the
+#                                   uncertain band (30-70), so it would turn every verdict into
+#                                   "uncertain". Its own checkpoint records val AUC 0.664, which
+#                                   says the same thing independently.
+#
+# The locally trained one is therefore reachable but second. To use it:
+#   NPR_MODEL_PATH=models/images/npr_detector.onnx
+# and re-measure with: python scripts/train_npr.py --eval-only --eval-dir <unseen generators>
+NPR_CHECKPOINT = os.environ.get("VERIFAI_NPR_CHECKPOINT") or first_existing(
+    os.path.join("models", "npr_detector.pth"),
+    os.path.join("models", "images", "npr_detector.pth"),
+)
+NPR_MODEL_PATH = os.environ.get("NPR_MODEL_PATH") or first_existing(
+    os.path.join("models", "npr_detector.onnx"),
+    os.path.join("models", "images", "npr_detector.onnx"),
+)
 
 
 def parse_weights(spec, defaults):

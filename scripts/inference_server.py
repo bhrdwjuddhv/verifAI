@@ -51,6 +51,7 @@ from common.config import (
     REAL_BELOW,
 )
 from common.xai import encode_overlay, gradcam_overlay
+from common import audio_v2
 
 # Torch-free build artifacts (see export_onnx.py and the Dockerfile's lean stage). ONNX_PATH
 # comes from common.config so the exporter and the server resolve the same file.
@@ -388,6 +389,9 @@ def load_npr_engine():
         source = meta_file.get("source", "npr")
         if meta_file.get("quantized"):
             source += "+int8"
+        # Name the file: two NPR builds ship with an identical `source` field, and a verdict
+        # that cannot say which one answered is a verdict you cannot audit.
+        source += f"({os.path.normpath(NPR_MODEL_PATH).replace(os.sep, chr(47))})"
         return predict, {"available": True, "modelSource": f"onnx:{source}",
                          "calibrated": bool(meta_file.get("calibrated"))}
     except Exception as e:
@@ -469,10 +473,19 @@ def load_face_detector():
 PREDICT, META, LOAD_ERROR, DETECTOR = None, {}, None, None
 NPR_PREDICT, NPR_META = None, {"available": False, "reason": "not loaded"}
 AUDIO_PREDICT, AUDIO_META = None, {"available": False, "reason": "not loaded"}
+# v2 runs raw samples through preproc.onnx; it is used only when its self-test passes.
+AUDIO_V2_PREDICT, AUDIO_V2_META = None, {"available": False, "reason": "not loaded"}
 
 
 def startup():
     global PREDICT, META, LOAD_ERROR, DETECTOR, NPR_PREDICT, NPR_META, AUDIO_PREDICT, AUDIO_META
+    global AUDIO_V2_PREDICT, AUDIO_V2_META
+    AUDIO_V2_PREDICT, AUDIO_V2_META = load_audio_v2_engine()
+    status = AUDIO_V2_META.get("selftest", {}).get("status", "unavailable")
+    print(f"[AUDIO v2] self-test {status}"
+          + (f" — {AUDIO_V2_META['reason']}" if not AUDIO_V2_PREDICT else
+             f" (delta {AUDIO_V2_META['selftest'].get('delta')})"))
+
     AUDIO_PREDICT, AUDIO_META = load_audio_engine()
     print(f"[AUDIO] {AUDIO_META.get('modelSource') if AUDIO_PREDICT else 'unavailable — ' + AUDIO_META['reason']}")
     NPR_PREDICT, NPR_META = load_npr_engine()
@@ -762,6 +775,39 @@ def analyze_video(path):
     }
 
 
+def load_audio_v2_engine():
+    """The v2 chain: raw samples -> preproc.onnx -> CNN, and ONLY if the self-test passes.
+
+    The self-test is the whole point. It proves this build reproduces the training pipeline's
+    number on a fixed input, which is what makes the same chain safe to run in a browser. A
+    chain that will not load, or that answers differently, is reported and NOT used — the v1
+    path keeps serving instead. There is no third behaviour where a verdict gets invented.
+    """
+    result = audio_v2.run_selftest(int(os.environ.get("VERIFAI_THREADS", "2")))
+    if result.get("status") != "pass":
+        return None, {"available": False, "reason": result.get("reason", "self-test did not pass"),
+                      "selftest": result}
+
+    preproc, cnn, meta, reason = audio_v2.load_chain(int(os.environ.get("VERIFAI_THREADS", "2")))
+    if reason:
+        return None, {"available": False, "reason": reason, "selftest": result}
+
+    def predict(image_or_samples, explain=None):
+        raise RuntimeError("v2 takes raw samples via predict_samples, not a spectrogram image")
+
+    def predict_samples(samples):
+        probs = audio_v2.probabilities(preproc, cnn, samples)
+        return float(probs[0, 0])  # index 0 = Fake
+
+    return predict_samples, {
+        "available": True,
+        "modelSource": "onnx:audio_v2(preproc.onnx -> audio_detector.onnx)",
+        "calibrated": False,
+        "selftest": result,
+        "imgSize": 224,
+    }
+
+
 def load_audio_engine():
     """Voice-clone detector. Same ONNX classifier machinery, fed a mel-spectrogram."""
     if not os.path.exists(AUDIO_MODEL_PATH):
@@ -870,13 +916,23 @@ def analyze_audio_window(samples, sr=16000):
         "speechDetected": is_speech,
         "windowSeconds": seconds,
         "vad": vad,
-        "modelSource": AUDIO_META.get("modelSource"),
+        "modelSource": (AUDIO_V2_META.get("modelSource") if AUDIO_V2_PREDICT
+                        else AUDIO_META.get("modelSource")),
     }
     if not is_speech:
         # Not scored on purpose. Returning a probability here is how a live guard cries wolf
         # at a silent room.
         return {**base, "fakeProbability": None,
                 "notes": [f"not scored: {vad['reason']}"]}
+
+    if AUDIO_V2_PREDICT is not None:
+        # Verified chain: the same graph the browser runs, so server and on-device agree.
+        fake_prob = AUDIO_V2_PREDICT(samples)
+        notes = ["v2 chain (preproc.onnx -> CNN), self-test passed"]
+        if not AUDIO_V2_META.get("calibrated", False):
+            notes.append("uncalibrated — treat as a ranking, not a probability")
+        return {**base, "modelSource": AUDIO_V2_META["modelSource"],
+                "fakeProbability": int(round(100.0 * fake_prob)), "notes": notes}
 
     image = spectrogram_from_samples(samples, sr, AUDIO_META.get("imgSize", 224))
     if image is None:
@@ -914,7 +970,10 @@ def create_app():
     @app.get("/")
     def health():
         return {"status": "ok" if (PREDICT or NPR_PREDICT) else "no_model", "error": LOAD_ERROR,
-                "faceDetector": DETECTOR is not None, "npr": NPR_META, "audio": AUDIO_META,
+                "faceDetector": DETECTOR is not None, "npr": NPR_META,
+                "audio": {**AUDIO_META, "v2": AUDIO_V2_META,
+                          "selftest": AUDIO_V2_META.get("selftest", {}).get("status", "unavailable"),
+                          "active": ("v2" if AUDIO_V2_PREDICT else "v1" if AUDIO_PREDICT else "none")},
                 "fusionWeights": FUSION_WEIGHTS,
                 # The extension mirrors these locally; /api/extension/manifest relays them so a
                 # retune here cannot leave installed clients scoring against stale settings.
@@ -970,6 +1029,7 @@ def create_app():
             except OSError:
                 pass
 
+    # Guard note: /predict-audio-window checks AUDIO_PREDICT, and v2 alone is enough to serve.
     @app.post("/predict-audio-window")
     def predict_audio_window(
         file: UploadFile = File(...),
@@ -981,10 +1041,11 @@ def create_app():
         WAV and PCM only, deliberately: decoding Opus/WebM would mean ffmpeg in the runtime
         image, and the browser can encode WAV from an AudioContext in a few lines.
         """
-        if AUDIO_PREDICT is None:
+        if AUDIO_PREDICT is None and AUDIO_V2_PREDICT is None:
             raise HTTPException(
                 status_code=501,
-                detail=f"Voice detection is not available ({AUDIO_META.get('reason')}).",
+                detail=f"Voice detection is not available ({AUDIO_META.get('reason')}; "
+                       f"v2: {AUDIO_V2_META.get('reason')}).",
             )
 
         raw = file.file.read()

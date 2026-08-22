@@ -45,13 +45,31 @@ venv/
 
 # training artifacts & datasets
 # Exclude the CONTENTS, not the directory — git cannot re-include a file whose parent dir is
-# excluded. The trained face ONNX has to be committed: the Docker build has no way to fetch it,
-# so without it a deploy silently falls back to the third-party model. 16MB, fine for git.
+# excluded, so every level needs its own /dir/* line before the ! entries.
+#
+# What ships: the files the SERVICE LOADS. A deploy has no way to fetch them — the Docker build
+# can rebuild NPR and YuNet from public sources, but nothing can reconstruct a model you
+# trained, and without it the service silently falls back to the third-party model or reports
+# "not available". ~35MB total, all well under GitHub's per-file limit.
+#
+# What does NOT ship: every .pth. Those are training artifacts, only needed to re-export, and
+# they double the weight for no runtime benefit.
 /models/*
 !/models/face/
 /models/face/*
-!/models/face/detector.onnx
-!/models/face/detector.json
+!/models/face/detector_v2.onnx
+!/models/face/detector_v2.json
+!/models/audio/
+/models/audio/*
+!/models/audio/audio_detector.onnx
+!/models/audio/audio_detector.json
+!/models/images/
+/models/images/*
+!/models/images/npr_detector.onnx
+!/models/images/npr_detector.json
+!/models/npr_detector.onnx
+!/models/npr_detector.json
+!/models/face_detection_yunet.onnx
 /public/models/
 /runs/
 

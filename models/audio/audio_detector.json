@@ -1,0 +1,43 @@
+{
+  "source": "trained_audio_checkpoint",
+  "labels": [
+    "Fake",
+    "Real"
+  ],
+  "modality": "audio",
+  "imgSize": 224,
+  "mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "expectsFace": false,
+  "temperature": 1.0,
+  "calibrated": false,
+  "valSplit": "stratified split requested",
+  "valMetrics": {
+    "acc": 1.0,
+    "balanced_acc": 1.0,
+    "auc_real_vs_rest": 1.0,
+    "recall_per_class": {
+      "Fake": 1.0,
+      "Real": 1.0
+    },
+    "confusion": [
+      [
+        9100,
+        0
+      ],
+      [
+        0,
+        5621
+      ]
+    ]
+  },
+  "quantized": false
+}
