@@ -35,6 +35,12 @@ runs
 models/**/*.pth
 models/audio/v2/scripts
 
+# Superseded by models/face/detector_v2.*, and gitignored — so a Render build (which clones)
+# never has them while a local build (which reads the disk) would silently add 83MB. Excluding
+# them keeps the two builds byte-comparable.
+models/detector.onnx
+models/detector.json
+
 # Local state and tooling
 .git
 .github
