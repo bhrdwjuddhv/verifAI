@@ -1,7 +1,0 @@
-__pycache__/
-*.pyc
-.hf/
-datasets.yaml
-create-admin.ts
-push_demo_branch.js
-run-verification-checks.ts

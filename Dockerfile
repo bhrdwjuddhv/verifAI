@@ -1,9 +1,14 @@
 # VerifAI model service — torch-free runtime image.
 #
-# BUILD CONTEXT IS THE REPOSITORY ROOT, not scripts/:
+# BUILD CONTEXT IS THE REPOSITORY ROOT:
 #
-#   docker build -f scripts/Dockerfile -t verifai-model .
+#   docker build -t verifai-model .
 #   docker run -p 8000:8000 verifai-model
+#
+# On Render: Root Directory must be EMPTY and Dockerfile Path is ./Dockerfile (both defaults).
+# Root Directory is what sets the build context — pointing it at scripts/ shrinks the context
+# to that folder, and every COPY below then fails with "/scripts: not found". This file lives
+# at the repository root precisely so the defaults are the correct settings.
 #
 # That is not a style choice. The trained models live in <repo>/models, and a build context of
 # scripts/ cannot reach them — Docker refuses any COPY that climbs above the context. The
@@ -18,7 +23,7 @@
 # fresh export produced. Re-export with scripts/export_onnx.py and commit the result.
 #
 # For the torch build instead (Grad-CAM rather than occlusion saliency, ~1.2GB RAM):
-#   docker build -f scripts/Dockerfile --target torch -t verifai-model-torch .
+#   docker build --target torch -t verifai-model-torch .
 
 # ---------------------------------------------------------------- optional torch build
 FROM python:3.11-slim AS torch
@@ -63,7 +68,7 @@ RUN set -eu; \
              models/face_detection_yunet.onnx \
              models/audio/audio_detector.onnx; do \
       [ -f "$f" ] || { echo "FATAL: $f missing from the image."; \
-                       echo "Build from the REPOSITORY ROOT: docker build -f scripts/Dockerfile ."; \
+                       echo "Build from the REPOSITORY ROOT with an EMPTY Render root dir."; \
                        exit 1; }; \
     done; \
     echo "models present:"; du -sh models/*

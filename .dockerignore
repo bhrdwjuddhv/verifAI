@@ -58,6 +58,14 @@ __pycache__
 ngrok.exe
 ngrok.zip
 
+# Inherited from the old scripts/.dockerignore, which is gone now: with the context at the
+# repository root, a .dockerignore inside scripts/ is never read.
+scripts/.hf
+scripts/datasets.yaml
+scripts/create-admin.ts
+scripts/push_demo_branch.js
+scripts/run-verification-checks.ts
+
 # Docs
 *.md
 !scripts/README_inference.md
