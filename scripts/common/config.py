@@ -79,17 +79,24 @@ REAL_BELOW = float(os.environ.get("VERIFAI_REAL_BELOW", "30"))
 #
 # Two are installed, and the ORDER here is a measurement, not a preference:
 #
-#   models/npr_detector.onnx        the authors' ProGAN-trained weights. On four hand-checked
-#                                   images: real 0%/0%, AI 100%/100% — decisive both ways.
-#   models/images/npr_detector.onnx trained here. Same four images: 55%/53% real, 67%/61% AI.
-#                                   It ranks them correctly but every score lands inside the
-#                                   uncertain band (30-70), so it would turn every verdict into
-#                                   "uncertain". Its own checkpoint records val AUC 0.664, which
-#                                   says the same thing independently.
+#   models/npr_detector.onnx        the authors' ProGAN-trained weights (int8). The default.
+#   models/images/npr_detector.onnx trained here, fp32. Records val AUC 0.664 in its own
+#                                   metadata — 0.5 is a coin flip, so that is weak, and it is
+#                                   the only accuracy number that exists for it.
 #
-# The locally trained one is therefore reachable but second. To use it:
+# It is NOT the default, and the reason is the absence of a measurement rather than a bad one:
+# nothing here has been evaluated on a labelled set of real vs generated images, so promoting
+# it over published weights would be a preference dressed up as a result.
+#
+# What HAS been measured (2026-08-22, six probe images, identical inputs): this checkpoint was
+# previously exported int8, and that export differed from fp32 by a mean of 41.9 points and a
+# max of 64.7. That is not quantization noise, it is a different model — the int8 build
+# collapsed into the uncertain band (4 of 6 images inside 30-70) while fp32 spans 0.2-98%.
+# The int8 build has therefore been replaced. The .pth is unchanged and always was.
+#
+# To use the locally trained one:
 #   NPR_MODEL_PATH=models/images/npr_detector.onnx
-# and re-measure with: python scripts/train_npr.py --eval-only --eval-dir <unseen generators>
+# and re-measure first with: python scripts/train_npr.py --eval-only --eval-dir <unseen generators>
 NPR_CHECKPOINT = env_path("VERIFAI_NPR_CHECKPOINT") or first_existing(
     os.path.join("models", "npr_detector.pth"),
     os.path.join("models", "images", "npr_detector.pth"),

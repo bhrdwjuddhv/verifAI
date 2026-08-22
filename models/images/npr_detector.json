@@ -1,6 +1,9 @@
 {
   "source": "npr:npr_detector.pth",
-  "labels": null,
+  "labels": [
+    "fake",
+    "real"
+  ],
   "sigmoid": true,
   "imgSize": 224,
   "mean": [
@@ -15,5 +18,7 @@
   ],
   "expectsFace": false,
   "calibrated": false,
-  "quantized": true
+  "quantized": false,
+  "valAuc": 0.6638994133333334,
+  "architecture": "NPR-ResNet-Bottleneck"
 }
