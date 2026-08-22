@@ -106,6 +106,13 @@ export const Nav: React.FC = () => {
           <Button
             variant="secondary"
             size="sm"
+            href="/call"
+          >
+            Live Guard
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
             href="/eval"
           >
             Eval Harness
@@ -143,6 +150,21 @@ export const Nav: React.FC = () => {
           >
             <div className="flex flex-col space-y-2">
               {NAV_LINKS.map((link) => (
+                <a
+                  key={link.label}
+                  href={link.href}
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="px-4 py-2.5 rounded-xl text-sm font-medium text-ink-200 hover:bg-ink-900 transition-colors"
+                >
+                  {link.label}
+                </a>
+              ))}
+              {/* The desktop bar carries these as buttons; without them here the two
+                  standalone tools are unreachable on a phone except by typing the URL. */}
+              {[
+                { label: 'Live Guard', href: '/call' },
+                { label: 'Eval Harness', href: '/eval' },
+              ].map((link) => (
                 <a
                   key={link.label}
                   href={link.href}
