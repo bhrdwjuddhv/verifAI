@@ -1,0 +1,57 @@
+# The model service builds from the REPOSITORY ROOT so it can reach models/ (see
+# scripts/Dockerfile). That means the whole repo is the build context, and without this file
+# node_modules and .next alone are hundreds of megabytes uploaded to the daemon on every build.
+#
+# Rule: exclude everything the FastAPI service does not need. It needs scripts/ and models/.
+
+# Node / Next.js — the web app, not the model service
+node_modules
+.next
+out
+build
+extension/node_modules
+extension/dist
+extension/public
+
+# The web app's source. The service never imports any of it.
+app
+components
+lib
+public
+middleware.ts
+next.config.js
+next-env.d.ts
+postcss.config.js
+tailwind.config.ts
+tsconfig.json
+package.json
+package-lock.json
+
+# Training artifacts and datasets — gigabytes, and the runtime cannot use a .pth anyway.
+data
+runs
+*.pth
+*.pt
+models/**/*.pth
+models/audio/v2/scripts
+
+# Local state and tooling
+.git
+.github
+.idea
+.vscode
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+.dhash_cache.json
+.env
+.env.*
+*.log
+ngrok.exe
+ngrok.zip
+
+# Docs
+*.md
+!scripts/README_inference.md
