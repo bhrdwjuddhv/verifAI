@@ -12,6 +12,9 @@
 
 import { getSettings } from '../shared/settings';
 import { isInCall, siteForUrl } from '../shared/callsites';
+// Chrome: creates the offscreen document if it is gone. Firefox: a no-op, because its
+// background page already is the document. Neither caller here needs to know which.
+import { audioSelftest, ensureOffscreen, type AudioSelftestResult } from '#host';
 import {
   ALPHA,
   FRAME_EVERY_MS,
@@ -20,12 +23,20 @@ import {
   initialState,
   pushWindow,
   rejectForeignModel,
+  type AudioMode,
   type GuardStatus,
   type GuardWindow,
   type RiskState,
 } from '../shared/liveguard';
 
 const MAX_WINDOWS = 200;
+
+const AUDIO_OFF: AudioMode = {
+  onDevice: false,
+  state: 'off',
+  reason: 'On-device voice is switched off; windows go to the backend.',
+  selftest: null,
+};
 
 interface Session {
   tabId: number;
@@ -36,6 +47,7 @@ interface Session {
   latestVideo: number | null;
   modelSource: string | null;
   note: string | null;
+  audio: AudioMode;
   frameTimer: ReturnType<typeof setInterval> | null;
 }
 
@@ -44,7 +56,7 @@ let session: Session | null = null;
 export function guardStatus(): GuardStatus {
   if (!session) {
     return {
-      active: false, tabId: null, siteLabel: null, source: 'server', trust: null,
+      active: false, tabId: null, siteLabel: null, source: 'server', audio: AUDIO_OFF, trust: null,
       band: 'idle', scored: 0, skipped: 0, consecutiveHigh: 0, modelSource: null,
       windows: [], note: null,
     };
@@ -53,7 +65,8 @@ export function guardStatus(): GuardStatus {
     active: true,
     tabId: session.tabId,
     siteLabel: session.siteLabel,
-    source: 'server',
+    source: session.audio.onDevice ? 'device' : 'server',
+    audio: session.audio,
     trust: session.risk.trust,
     band: session.risk.band,
     scored: session.risk.scored,
@@ -101,7 +114,18 @@ async function scoreWindow(wav: ArrayBuffer): Promise<void> {
     return;
   }
 
-  const out = await res.json();
+  await recordWindow(await res.json());
+}
+
+/**
+ * Fold one window result into the risk state, whichever path produced it.
+ *
+ * Both paths answer in the same shape on purpose, so the provenance check, the VAD handling
+ * and the smoothing happen once. A second copy of this for the on-device path would be a
+ * second place for "unscored" to quietly become "safe".
+ */
+async function recordWindow(out: any): Promise<void> {
+  if (!session) return;
   const t = (Date.now() - session.startedAt) / 1000;
 
   const foreign = rejectForeignModel(out.modelSource);
@@ -118,7 +142,7 @@ async function scoreWindow(wav: ArrayBuffer): Promise<void> {
 
   if (!out.speechDetected || out.fakeProbability === null) {
     session.risk = pushWindow(session.risk, { audio: null, video: null }, { alpha: ALPHA, hysteresis: HYSTERESIS });
-    session.windows.push({ t, audio: null, video: null, fused: null, speech: false, modelSource: out.modelSource, note: out.vad?.reason });
+    session.windows.push({ t, audio: null, video: null, fused: null, speech: false, modelSource: out.modelSource, note: out.vad?.reason ?? out.notes?.[0] });
   } else {
     const audio: number = out.fakeProbability;
     session.risk = pushWindow(session.risk, { audio, video: session.latestVideo }, { alpha: ALPHA, hysteresis: HYSTERESIS });
@@ -169,6 +193,51 @@ async function scoreFrame(): Promise<void> {
   }
 }
 
+/**
+ * Decide, once per session, whether voice runs on this machine.
+ *
+ * The setting is only a request. What actually opens the gate is the offscreen document
+ * reproducing `expected_prob` from `audio_selftest.json` through `preproc.onnx -> CNN` within
+ * `tol`, here, on this GPU or this wasm build. That is the whole safety argument for running
+ * audio off-server at all: without it, a subtly different spectrogram would produce confident
+ * nonsense that looks exactly like a real verdict.
+ *
+ * Every failure path lands on the backend. None of them lands on a made-up number.
+ */
+async function armAudio(): Promise<AudioMode> {
+  const { onDeviceAudio } = await getSettings();
+  if (!onDeviceAudio) return AUDIO_OFF;
+
+  const result: AudioSelftestResult = await audioSelftest().catch((err: Error) => ({
+    status: 'unavailable' as const,
+    reason: err.message,
+  }));
+
+  const selftest = {
+    status: result?.status ?? 'unavailable',
+    delta: result?.delta,
+    tol: result?.tol,
+    ep: result?.ep,
+  };
+
+  if (result?.status === 'pass') {
+    return {
+      onDevice: true,
+      state: 'verified',
+      reason: null,
+      selftest,
+    };
+  }
+  return {
+    onDevice: false,
+    state: 'backend',
+    reason:
+      `On-device voice is switched on but its parity self-test did not pass ` +
+      `(${result?.reason ?? 'no reason given'}), so windows go to the backend instead.`,
+    selftest,
+  };
+}
+
 export async function startGuard(tabId: number): Promise<{ ok: boolean; reason?: string }> {
   if (session) await stopGuard();
 
@@ -197,6 +266,14 @@ export async function startGuard(tabId: number): Promise<{ ok: boolean; reason?:
     return { ok: false, reason: `Could not capture this tab: ${(err as Error)?.message ?? err}` };
   }
 
+  // Chrome evicts the offscreen document; without this, the first window of a call after an
+  // idle period would have nowhere to be captured.
+  await ensureOffscreen();
+
+  // Decided before capture starts and fixed for the session: switching paths mid-call would
+  // put two differently-calibrated score sources into one smoothed trust number.
+  const audio = await armAudio();
+
   session = {
     tabId,
     siteLabel: site.label,
@@ -205,7 +282,8 @@ export async function startGuard(tabId: number): Promise<{ ok: boolean; reason?:
     windows: [],
     latestVideo: null,
     modelSource: null,
-    note: null,
+    note: audio.state === 'backend' ? audio.reason : null,
+    audio,
     frameTimer: null,
   };
 
@@ -213,6 +291,7 @@ export async function startGuard(tabId: number): Promise<{ ok: boolean; reason?:
     type: 'offscreen:live-start',
     streamId,
     windowSeconds: WINDOW_SECONDS,
+    onDevice: audio.onDevice,
   }).catch((err: Error) => ({ ok: false, reason: err.message }));
 
   if (!started?.ok) {
@@ -232,10 +311,39 @@ export async function stopGuard(): Promise<void> {
   await broadcast();
 }
 
-/** Called by the offscreen document for every completed window. */
+/** Called by the offscreen document for every completed window, on the backend route. */
 export async function onLiveWindow(wav: ArrayBuffer): Promise<void> {
   if (!session) return;
   await scoreWindow(wav);
+}
+
+/**
+ * Called by the offscreen document for every window it scored itself.
+ *
+ * A window the chain could not score demotes the whole session to the backend rather than
+ * being dropped. Silently losing coverage is the failure a live guard cannot afford: a user
+ * watching a steady trust number has no way to tell it has stopped updating.
+ */
+export async function onLiveScore(out: any): Promise<void> {
+  if (!session) return;
+
+  if (out?.onDeviceFailed) {
+    session.audio = {
+      onDevice: false,
+      state: 'backend',
+      reason: `On-device voice stopped mid-call (${out.notes?.[0] ?? 'unknown error'}); ` +
+        'switched to the backend for the rest of this call.',
+      selftest: session.audio.selftest,
+    };
+    await chrome.runtime
+      .sendMessage({ type: 'offscreen:live-route', onDevice: false })
+      .catch(() => undefined);
+    session.note = session.audio.reason;
+    await broadcast();
+    return;
+  }
+
+  await recordWindow(out);
 }
 
 export function guardTabId(): number | null {

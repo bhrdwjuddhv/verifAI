@@ -16,7 +16,8 @@
     "parity": "node scripts/preview.mjs",
     "pack": "node scripts/pack.mjs",
     "pack:firefox": "node scripts/pack.mjs --target=firefox",
-    "check:liveguard": "node --experimental-strip-types scripts/check-liveguard.mjs"
+    "check:liveguard": "node --experimental-strip-types scripts/check-liveguard.mjs",
+    "check:audio": "node --experimental-strip-types scripts/check-audio-v2.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.268",

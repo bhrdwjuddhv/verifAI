@@ -1,0 +1,29 @@
+{
+  "architecture": "EfficientNet-B0",
+  "modality": "audio",
+  "input_shape": [
+    1,
+    3,
+    224,
+    224
+  ],
+  "normalization": {
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ]
+  },
+  "labels": [
+    "Fake",
+    "Real"
+  ],
+  "temperature": 1.0,
+  "quantized": false,
+  "onnx_model": "audio_detector.onnx"
+}

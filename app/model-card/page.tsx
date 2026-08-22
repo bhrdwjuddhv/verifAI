@@ -64,9 +64,14 @@ export default function ModelCardPage() {
               authors’ ProGAN-trained checkpoint unless you train your own.
             </Row>
             <Row label="3. Voice model">
-              Mel-spectrogram → classifier, for audio uploads. <strong>Not trained yet</strong>: the
-              route returns 501 with the reason until <span className="font-mono">models/audio_detector.onnx</span>{' '}
-              exists. See <span className="font-mono">youhavetodo.md</span>.
+              Spectrogram → classifier, for audio uploads and live calls. Trained here; see the
+              accuracy caveat below, which is a real one. Two paths exist:{' '}
+              <span className="font-mono">v1</span> builds the spectrogram in Python, while{' '}
+              <span className="font-mono">v2</span> puts that step inside the ONNX graph
+              (<span className="font-mono">preproc.onnx → CNN</span>) so a browser can run the
+              identical pipeline. v2 is used only when it reproduces a fixed known probability
+              within tolerance at startup — otherwise the service logs why and keeps serving v1.
+              With neither loaded the route returns 501 with the reason, never a guess.
             </Row>
             <Row label="How they combine">
               A weighted mean over whichever detectors actually ran (
@@ -198,8 +203,10 @@ export default function ModelCardPage() {
           <h2 className="text-lg font-semibold mb-2">Limits</h2>
           <ul className="space-y-2 text-sm text-ink-300 font-normal leading-relaxed list-disc pl-5">
             <li>
-              Images and short video. Voice has a route but no trained model; lip-sync detection is
-              not implemented at all.
+              Images, short video and voice. The voice model&rsquo;s reported accuracy is not
+              source-held-out, so treat its scores as a ranking rather than a probability until
+              the call-conditions evaluation above is filled in. Lip-sync detection is not
+              implemented at all.
             </li>
             <li>
               Video re-encoding weakens NPR badly — measured here: an AI image scoring 100 as a

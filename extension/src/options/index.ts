@@ -41,6 +41,8 @@ async function boot(): Promise<void> {
 
   autoScanBox.checked = settings.autoScan;
   paintAutoNote(settings.autoScan);
+  onDeviceAudioBox.checked = settings.onDeviceAudio;
+  paintAudioNote(settings.onDeviceAudio, null);
   await paintSites();
 
   await paintPermission(settings.serverUrl);
@@ -57,6 +59,69 @@ autoScanBox.addEventListener('change', async () => {
   paintAutoNote(settings.autoScan);
   await paintSites();
 });
+
+const onDeviceAudioBox = document.getElementById('on-device-audio') as HTMLInputElement;
+const audioNote = document.getElementById('audio-note')!;
+const audioSelftestButton = document.getElementById('audio-selftest') as HTMLButtonElement;
+
+onDeviceAudioBox.addEventListener('change', async () => {
+  await setSettings({ onDeviceAudio: onDeviceAudioBox.checked });
+  paintAudioNote(onDeviceAudioBox.checked, null);
+});
+
+audioSelftestButton.addEventListener('click', async () => {
+  audioSelftestButton.disabled = true;
+  audioNote.textContent = 'Running the parity check…';
+  audioNote.className = 'muted';
+  try {
+    const result = await ask({ type: 'audio-selftest' } as UiRequest);
+    paintAudioNote(onDeviceAudioBox.checked, result as AudioSelftestReport);
+  } finally {
+    audioSelftestButton.disabled = false;
+  }
+});
+
+interface AudioSelftestReport {
+  status?: string;
+  delta?: number;
+  tol?: number;
+  ep?: string;
+  reason?: string | null;
+}
+
+/**
+ * The check is reported with its numbers, not as a green tick.
+ *
+ * "Verified" here means something specific — the chain reproduced the training pipeline's
+ * probability to within `tol` — and a user who can see the delta can tell the difference
+ * between a comfortable pass and one sitting on the threshold.
+ */
+function paintAudioNote(enabled: boolean, result: AudioSelftestReport | null): void {
+  if (!enabled) {
+    audioNote.textContent =
+      'Off. Live Guard sends 3-second voice windows to the backend above, and only while a ' +
+      'call is being monitored.';
+    audioNote.className = 'muted';
+    return;
+  }
+  if (!result) {
+    audioNote.textContent =
+      'Requested. The parity check runs when Live Guard next starts; run it now to see the result.';
+    audioNote.className = 'muted';
+    return;
+  }
+  if (result.status === 'pass') {
+    audioNote.textContent =
+      `Verified on ${result.ep ?? 'this machine'} — the chain matched the training pipeline to ` +
+      `${result.delta?.toExponential(1)} (tolerance ${result.tol}). Voice stays on this machine.`;
+    audioNote.className = 'pill-ok';
+    return;
+  }
+  audioNote.textContent =
+    `Not verified (${result.status ?? 'unavailable'}): ${result.reason ?? 'no reason given'}. ` +
+    'Live Guard will use the backend instead.';
+  audioNote.className = 'muted';
+}
 
 function paintAutoNote(enabled: boolean): void {
   if (!enabled) {

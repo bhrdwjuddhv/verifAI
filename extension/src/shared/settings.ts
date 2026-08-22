@@ -24,6 +24,17 @@ export interface Settings {
   consentVersion: number;
   /** Phase 4. Off by design, and on-device only when it lands. */
   autoScan: boolean;
+  /**
+   * Run Live Guard's voice detection in this browser instead of posting windows to the
+   * backend.
+   *
+   * Off by default, and asking for it is only a request: the chain still has to reproduce
+   * `expected_prob` from `audio_selftest.json` on this machine before a single window is
+   * scored locally. If it does not, the guard uses the backend and says so. Turning this on
+   * can therefore never be the reason a wrong number appears — only the reason no audio
+   * leaves the machine.
+   */
+  onDeviceAudio: boolean;
 }
 
 /**
@@ -37,6 +48,7 @@ export const DEFAULTS: Settings = {
   serverUrl: DEFAULT_SERVER_URL,
   consentVersion: 0,
   autoScan: false,
+  onDeviceAudio: false,
 };
 
 const AREA: chrome.storage.StorageArea = chrome.storage.sync ?? chrome.storage.local;

@@ -10,6 +10,8 @@ import { score, type ScoreRequest } from './score';
 import { startCapture, stopCapture } from './live';
 import { backend } from './session';
 import { wasmAllowed } from '../shared/wasm';
+import { MODEL_SOURCE as AUDIO_MODEL_SOURCE, scoreSamples, selftest } from './audio';
+import { speechMetrics } from '../shared/vad';
 
 export interface Capabilities {
   crossOriginIsolated: boolean;
@@ -75,13 +77,41 @@ chrome.runtime.onMessage.addListener(handle);
 
 /**
  * Live Guard capture lives here because only a document has getUserMedia and AudioContext.
- * Windows go back to the worker base64-encoded: chrome messaging JSON-serialises, so an
- * ArrayBuffer would silently arrive as `{}`.
+ *
+ * Two possible routes for a completed window, decided by the worker when it starts the
+ * session and never mid-call:
+ *
+ *   on-device — the samples are scored here by the v2 chain and only a probability crosses
+ *               back. The call audio never leaves this document, let alone the machine.
+ *   backend   — the WAV goes to the worker base64-encoded, because chrome messaging
+ *               JSON-serialises and an ArrayBuffer would silently arrive as `{}`.
  */
+let liveOnDevice = false;
+
 chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
+  if (message?.type === 'offscreen:audio-selftest') {
+    selftest().then(sendResponse, (err) =>
+      sendResponse({ status: 'unavailable', reason: String(err?.message ?? err) })
+    );
+    return true;
+  }
+
+  // The worker can revoke on-device routing mid-call — if the chain throws after the
+  // self-test passed, the rest of the session must reach the backend, not stop being scored.
+  if (message?.type === 'offscreen:live-route') {
+    liveOnDevice = message.onDevice === true;
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message?.type === 'offscreen:live-start') {
+    liveOnDevice = message.onDevice === true;
     startCapture(message.streamId, message.windowSeconds, {
-      onWindow: (wav) => {
+      onWindow: (wav, samples, sampleRate) => {
+        if (liveOnDevice) {
+          void scoreWindowOnDevice(samples, sampleRate);
+          return;
+        }
         let binary = '';
         const bytes = new Uint8Array(wav);
         for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
@@ -104,3 +134,62 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
   }
   return undefined;
 });
+
+/**
+ * Score one window locally and send the worker the same shape the backend endpoint returns,
+ * so the risk engine above does not need to know which path produced it.
+ *
+ * The VAD runs first, exactly as the service does it — a call is mostly silence, and a guard
+ * that scores silence cries wolf. A window the chain cannot score is reported unscored; there
+ * is no branch here that produces a number without the model.
+ */
+async function scoreWindowOnDevice(samples: Float32Array, sampleRate: number): Promise<void> {
+  const vad = speechMetrics(samples);
+  const base = {
+    type: 'offscreen:live-score',
+    speechDetected: vad.isSpeech,
+    windowSeconds: Math.round((samples.length / sampleRate) * 100) / 100,
+    vad: { rmsDbfs: vad.rmsDbfs, spectralFlatness: vad.spectralFlatness, reason: vad.reason },
+    modelSource: AUDIO_MODEL_SOURCE,
+  };
+
+  if (!vad.isSpeech) {
+    chrome.runtime
+      .sendMessage({ ...base, fakeProbability: null, notes: [`not scored: ${vad.reason}`] })
+      .catch(() => undefined);
+    return;
+  }
+
+  let probability: number | null = null;
+  let failure: string | null = null;
+  try {
+    probability = await scoreSamples(samples);
+  } catch (err) {
+    failure = String((err as Error)?.message ?? err);
+  }
+
+  if (probability === null) {
+    // The gate closed, or the chain threw. Say so and score nothing — the worker decides
+    // whether to fall back, and a missing number must never read as a low one.
+    chrome.runtime
+      .sendMessage({
+        ...base,
+        fakeProbability: null,
+        onDeviceFailed: true,
+        notes: [failure ?? 'the on-device chain declined this window'],
+      })
+      .catch(() => undefined);
+    return;
+  }
+
+  chrome.runtime
+    .sendMessage({
+      ...base,
+      fakeProbability: Math.round(100 * probability),
+      notes: [
+        'on-device v2 chain (preproc.onnx -> CNN), parity self-test passed',
+        'uncalibrated — treat as a ranking, not a probability',
+      ],
+    })
+    .catch(() => undefined);
+}

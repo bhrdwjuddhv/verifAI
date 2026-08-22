@@ -16,7 +16,16 @@ import os
 
 import numpy as np
 
-V2_DIR = os.environ.get("VERIFAI_AUDIO_V2_DIR", os.path.join("models", "audio", "v2", "models", "audio"))
+try:
+    from .config import resolve          # imported as common.audio_v2, the normal path
+except ImportError:                      # run directly: python scripts/common/audio_v2.py
+    from config import resolve
+
+# resolve() so this works from any working directory. Without it, running a script from
+# scripts/ reports "v2 audio not installed" — indistinguishable from actually not having it,
+# and the service would quietly serve v1 instead.
+V2_DIR = resolve(os.environ.get("VERIFAI_AUDIO_V2_DIR")
+                 or os.path.join("models", "audio", "v2", "models", "audio"))
 V2_PREPROC = os.path.join(V2_DIR, "preproc.onnx")
 V2_CNN = os.path.join(V2_DIR, "audio_detector.onnx")
 V2_SELFTEST = os.path.join(V2_DIR, "audio_selftest.json")

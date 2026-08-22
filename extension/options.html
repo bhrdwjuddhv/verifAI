@@ -71,6 +71,25 @@
       </section>
 
       <section class="card">
+        <h2>On-device voice (Live Guard)</h2>
+        <p class="soft">
+          Runs the voice detector in this browser during a call, so no call audio is uploaded.
+          Off by default, and switching it on is only a request: the detector has to reproduce
+          a known result from the training pipeline on this machine, to within a fixed
+          tolerance, before a single window is scored here. If it cannot, Live Guard uses our
+          own backend instead and says so on the call overlay — it never falls back to a guess.
+        </p>
+        <label class="check">
+          <input type="checkbox" id="on-device-audio" />
+          <span>Score voice on this machine when the parity check passes</span>
+        </label>
+        <p class="muted" id="audio-note"></p>
+        <div class="actions">
+          <button id="audio-selftest">Run the parity check</button>
+        </div>
+      </section>
+
+      <section class="card">
         <h2>On-device engine</h2>
         <p class="soft">
           What this machine can actually run. Measured here, not assumed — the answer decides

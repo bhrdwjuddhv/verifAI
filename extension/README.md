@@ -20,15 +20,74 @@ overlay will not appear.
 
 Other limits, stated rather than buried:
 
-- Audio windows go to **your** VerifAI backend (`/api/live/audio-window`), which runs this
-  project's trained voice model. Nothing is sent anywhere else. On-device audio is not
-  implemented — see below.
+- Where the voice score is computed **depends on what this machine can prove it can do**, and
+  the call overlay says which on every session:
+  - *"voice: on-device (parity verified)"* — video and audio both run on this machine, and no
+    call audio leaves it.
+  - *"voice: our backend"* — video runs on-device; 3-second audio windows go to **your**
+    VerifAI backend (`/api/live/audio-window`), which runs this project's trained voice model.
+    Nothing is sent anywhere else.
+
+  On-device voice is off by default. Switching it on in Options is a *request*: the extension
+  still has to reproduce a known result from the training pipeline before it is used. See
+  [On-device voice](#on-device-voice-the-parity-gate).
 - Verdicts are refused unless `modelSource` names one of this project's trained models. A
   score from the Hugging Face fallback is shown as a refusal, not as a number.
 - `tabCapture` is requested in the manifest; the call platforms are **optional** host
   permissions, granted per platform when you start monitoring.
 - Capturing tab audio mutes the tab unless the stream is played back — Live Guard routes it
   through at unity gain, so you still hear your call.
+
+### On-device voice: the parity gate
+
+Running voice detection in a browser was previously unsafe, and not for a lack of compute. The
+model is trained on mel-spectrograms produced by librosa, and a JavaScript reimplementation of
+that transform cannot be trusted to match: a subtly wrong spectrogram does not fail, it
+produces confident nonsense with nothing in the logs to explain it.
+
+The v2 chain removes the reimplementation instead of trying to get it right. The preprocessing
+is itself exported to ONNX, so the browser and the server run **the same graph**:
+
+```
+raw samples -> preproc.onnx -> audio_detector.onnx -> P(fake)
+```
+
+That is the claim. The gate is what checks it, here, on your machine, every time the offscreen
+document loads:
+
+1. `audio_selftest.json` carries one fixed input and the probability the training pipeline
+   produced for it, with a tolerance (`tol`, currently 1e-3).
+2. The extension runs that input through its own copy of the chain — WebGPU first, then wasm,
+   because GPU float32 reduces in a different order and the tolerance is tight.
+3. On-device voice is enabled **only** if the result lands within `tol`.
+
+Anything else — the chain missing from the build, WebAssembly blocked by CSP, a delta over
+tolerance, an exception mid-call — routes that session to the backend and states the reason on
+the overlay. There is no path where a failed gate produces a verdict anyway.
+
+Two details worth knowing:
+
+- The self-test JSON stores only the first 1600 of its 48000 samples, while `expected_prob` was
+  computed on all of them. The vector is a documented deterministic three-tone signal, so it is
+  regenerated and then checked against both the stored prefix and a checksum before use — a
+  self-test run on the wrong input proves nothing. See `src/shared/audio-selftest.ts`, which
+  mirrors `scripts/common/audio_v2.py`.
+- The voice-activity gate is ported too (`src/shared/vad.ts`), so both paths agree about which
+  windows are worth scoring. It computes spectral flatness over the largest power-of-two prefix
+  rather than shipping a mixed-radix FFT; measured against numpy the largest divergence was
+  0.0047, against a threshold of 0.45.
+
+Verify it yourself:
+
+```bash
+npm run build
+npm run check:audio       # fixture, bundle and chain, through onnxruntime-node
+npm run check:liveguard   # provenance, call sites, and that the chain is bundled whole
+```
+
+`check:audio` is not a substitute for the runtime gate — it runs in Node, not the browser's
+wasm build. It proves the fixture, the bundle and the maths; the runtime gate proves the
+machine.
 
 ---
 

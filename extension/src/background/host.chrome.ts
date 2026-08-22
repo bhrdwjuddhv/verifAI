@@ -72,3 +72,24 @@ export async function probeCapabilities(): Promise<Capabilities | { error: strin
   await ensureOffscreen();
   return (await chrome.runtime.sendMessage({ type: 'offscreen:probe' })) as Capabilities;
 }
+
+export interface AudioSelftestResult {
+  status: 'pass' | 'fail' | 'unavailable';
+  observed?: number;
+  expected?: number;
+  tol?: number;
+  delta?: number;
+  ep?: string;
+  reason: string | null;
+}
+
+/**
+ * Run the v2 audio parity check in the offscreen document, where the graphs live.
+ *
+ * The result is cached there for the life of the document, so calling this repeatedly costs
+ * nothing after the first run — and Live Guard reads the same cached answer when it starts.
+ */
+export async function audioSelftest(): Promise<AudioSelftestResult> {
+  await ensureOffscreen();
+  return (await chrome.runtime.sendMessage({ type: 'offscreen:audio-selftest' })) as AudioSelftestResult;
+}

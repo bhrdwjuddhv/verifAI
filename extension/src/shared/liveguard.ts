@@ -36,11 +36,28 @@ export interface GuardWindow {
   note?: string;
 }
 
+/**
+ * Where the voice score for this session is coming from, and why.
+ *
+ * `verified` is the only state in which audio stays on the machine, and it is only reachable
+ * by the parity self-test passing at runtime. Every other state routes to the backend — the
+ * `reason` is shown rather than hidden, because "we quietly stopped doing the private thing"
+ * is exactly the kind of change a user should not have to infer.
+ */
+export interface AudioMode {
+  onDevice: boolean;
+  state: 'verified' | 'backend' | 'off';
+  reason: string | null;
+  selftest?: { status: string; delta?: number; tol?: number; ep?: string } | null;
+}
+
 export interface GuardStatus {
   active: boolean;
   tabId: number | null;
   siteLabel: string | null;
   source: GuardSource;
+  /** Whether voice ran here or on the backend, and what decided that. */
+  audio: AudioMode;
   /** 0-100 trust (100 - smoothed risk), null before the first scored window. */
   trust: number | null;
   band: string;
@@ -60,7 +77,7 @@ export interface GuardStatus {
  * silent fallback to some other model — a stale bundle, the HF fallback, a third-party API —
  * would produce numbers a user reads as VerifAI's. Failing loudly is the honest outcome.
  */
-const OUR_MODEL_MARKERS = ['trained_checkpoint', 'trained_audio_checkpoint', 'npr:'];
+const OUR_MODEL_MARKERS = ['trained_checkpoint', 'trained_audio_checkpoint', 'npr:', 'audio_v2'];
 
 export function isOurModel(modelSource: string | null | undefined): boolean {
   if (!modelSource) return false;

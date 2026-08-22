@@ -83,7 +83,14 @@ export type UiRequest =
   /** Why auto-scan is or is not running in the active tab. */
   | { type: 'ui:auto-status' }
   /** The service worker's build stamp, for detecting a worker left behind by a reload. */
-  | { type: 'ui:build' };
+  | { type: 'ui:build' }
+  /**
+   * Run the v2 audio parity check on this machine and report the numbers.
+   *
+   * The same check gates on-device voice when Live Guard starts; exposing it here lets a user
+   * see whether their machine passes without having to join a call to find out.
+   */
+  | { type: 'audio-selftest' };
 
 export type UiResponse =
   | { type: 'state'; scans: ScanState[] }

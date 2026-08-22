@@ -55,6 +55,36 @@ number, not evidence. With neither available the verdict is `uncertain` and the 
 
 NPR loads separately from `NPR_MODEL_PATH`, and the voice model from `AUDIO_MODEL_PATH`.
 
+### The voice model has two paths, and one of them has to earn its place
+
+```
+v2 (preferred)  raw samples -> models/audio/v2/.../preproc.onnx -> audio_detector.onnx
+v1 (fallback)   audio file  -> librosa mel-spectrogram (Python only) -> audio_detector.onnx
+```
+
+v2 exists so the browser can run the identical graph — librosa cannot, and a JavaScript
+mel-spectrogram that is subtly wrong yields confident nonsense. Because the preprocessing is
+part of the graph, the same chain works on both sides.
+
+The server does not take that on trust. At startup it runs `audio_selftest.json` through
+`preproc -> cnn` and compares against the probability the training pipeline recorded:
+
+```
+[AUDIO v2] self-test pass (delta 3e-06)
+```
+
+Only on a pass does v2 become the live path. On a failure — or a missing `.onnx.data` sidecar,
+the usual cause — it logs why and v1 keeps serving. `/health` reports both:
+
+```json
+"audio": { "active": "v2", "selftest": "pass",
+           "v2": { "selftest": { "delta": 3e-06, "tol": 0.001 } } }
+```
+
+`active` is `"v2"`, `"v1"` or `"none"`; `"none"` means `/predict-audio` returns 501. The
+extension gates its on-device audio on the same fixture, so a machine that cannot reproduce the
+number falls back to this service instead of scoring locally.
+
 ## Response
 
 ```json
@@ -100,7 +130,8 @@ per-frame table); audio replaces the image signals with `audioScore`.
 | `VERIFAI_HF_MODEL` | `prithivMLmods/Deep-Fake-Detector-v2-Model` | fallback classifier |
 | `VERIFAI_HF_EXPECTS_FACE` | `1` | set `0` if you swap in a whole-image AI detector |
 | `NPR_MODEL_PATH` | `models/npr_detector.onnx` | NPR whole-image AI-generation detector |
-| `AUDIO_MODEL_PATH` | `models/audio_detector.onnx` | voice model; absent = `/predict-audio` 501s |
+| `AUDIO_MODEL_PATH` | `models/audio/audio_detector.onnx` | v1 voice model; absent = `/predict-audio` 501s |
+| `VERIFAI_AUDIO_V2_DIR` | `models/audio/v2/models/audio` | the v2 chain; used only if its self-test passes |
 | `FUSION_WEIGHTS` | `face=0.5,npr=0.5,frequency=0.0` | how the detectors combine |
 | `VIDEO_FRAME_CAP` / `VIDEO_MAX_SECONDS` | `16` / `60` | frames sampled per clip, length ceiling |
 | `VERIFAI_FAKE_ABOVE` / `VERIFAI_REAL_BELOW` | `70` / `30` | verdict bands |

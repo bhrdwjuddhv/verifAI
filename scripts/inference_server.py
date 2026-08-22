@@ -49,13 +49,18 @@ from common.config import (
     MODEL_PATH,
     NPR_MODEL_PATH,
     REAL_BELOW,
+    env_path,
+    resolve,
 )
 from common.xai import encode_overlay, gradcam_overlay
 from common import audio_v2
 
 # Torch-free build artifacts (see export_onnx.py and the Dockerfile's lean stage). ONNX_PATH
 # comes from common.config so the exporter and the server resolve the same file.
-YUNET_PATH = os.environ.get("VERIFAI_YUNET", os.path.join("models", "face_detection_yunet.onnx"))
+# resolve() like every other model path: without it, starting the service from any directory
+# but the repo root drops the face detector silently and every face verdict degrades to a
+# whole-image one, with only a WARN line to say so.
+YUNET_PATH = env_path("VERIFAI_YUNET") or resolve(os.path.join("models", "face_detection_yunet.onnx"))
 
 MAX_BYTES = 50 * 1024 * 1024
 FACE_MARGIN = float(os.environ.get("VERIFAI_FACE_MARGIN", "0.35"))

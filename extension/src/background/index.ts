@@ -9,7 +9,7 @@ import type { ContentEvent, UiRequest, UiResponse } from '../shared/protocol';
 import { sendToTab } from '../shared/protocol';
 import { cacheStats, clearCache } from './cache';
 import { dismiss, explain, listScans, rescanOnServer, retry, startScan } from './scans';
-import { probeCapabilities } from '#host';
+import { audioSelftest, probeCapabilities } from '#host';
 import { autoAllowed, syncContentScripts } from './sites';
 import { REFRESH_ALARM, REFRESH_MINUTES, checkDrift, refreshManifest } from './drift';
 
@@ -93,7 +93,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   });
 });
 
-import { guardStatus, onLiveWindow, startGuard, stopGuard } from './liveguard';
+import { guardStatus, onLiveScore, onLiveWindow, startGuard, stopGuard } from './liveguard';
 
 // Live Guard messages are handled before the scan router: they are their own feature and must
 // keep working while a file scan is queued.
@@ -117,6 +117,12 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     void onLiveWindow(bytes.buffer);
+    return false;
+  }
+  if (message?.type === 'offscreen:live-score') {
+    // Already a probability: the on-device route scored it in the offscreen document, so no
+    // audio crossed into the worker at all.
+    void onLiveScore(message);
     return false;
   }
   if (message?.type === 'offscreen:live-error') {
@@ -251,6 +257,10 @@ async function handle(message: UiRequest): Promise<UiResponse> {
       // Returned as-is rather than wrapped: the options page renders the raw capability
       // record, and inventing a schema for it here would only add a place to drift.
       return (await probeCapabilities()) as unknown as UiResponse;
+    case 'audio-selftest':
+      // Same shape the gate uses, deltas included. The options page shows the numbers rather
+      // than a tick, so a pass sitting on the tolerance is distinguishable from a clean one.
+      return (await audioSelftest()) as unknown as UiResponse;
     default:
       // Naming the type matters: an unrecognised message almost always means the worker is
       // older than the page that sent it, and "unknown request" alone says none of that.

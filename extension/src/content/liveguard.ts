@@ -132,6 +132,10 @@ export function renderGuard(status: GuardStatus): void {
     status.siteLabel,
     `${status.scored} scored`,
     status.skipped ? `${status.skipped} silent` : '',
+    // Where the voice score came from. Worth a permanent line rather than a tooltip: it is
+    // the difference between audio staying on this machine and audio being uploaded, and the
+    // user should never have to guess which one is happening.
+    status.audio?.state === 'verified' ? 'voice: on-device (parity verified)' : 'voice: our backend',
     status.modelSource ? `model: ${status.modelSource}` : '',
   ].filter(Boolean).join(' · ');
 

@@ -117,6 +117,13 @@ on-device mode does not upload at all.
 **Auto-scan** never uploads under any setting. It runs only when the scan mode is on-device,
 and the service worker re-checks that at the moment of every scan.
 
+**Live Guard audio.** While a user is monitoring a call, 3-second windows of that call's audio
+are either scored on their machine or sent to the VerifAI server they configured — never
+anywhere else, and only while monitoring is running. Which of the two applies is decided by a
+numerical parity check at the start of each session and shown on the call overlay throughout;
+on-device is off by default and cannot be enabled without the check passing. No call audio is
+retained on either path.
+
 **Remote code: none.** Every model, the ONNX Runtime WebAssembly and all JavaScript are in the
 package. There is no CDN load, no `eval`, and no hosted-code execution path — the non-bundled
 WebGPU build of ONNX Runtime was chosen specifically because the default entry point contains

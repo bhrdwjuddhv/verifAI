@@ -12,6 +12,7 @@
 import type { ScanResult } from '../shared/scan-types';
 import { score, type ScoreRequest } from '../offscreen/score';
 import { backend } from '../offscreen/session';
+import { selftest } from '../offscreen/audio';
 import { wasmAllowed } from '../shared/wasm';
 
 /** No document to create. Kept so callers do not need a per-target branch. */
@@ -37,6 +38,21 @@ export interface Capabilities {
   /** False when the manifest's CSP forbids WebAssembly — nothing can run until it is fixed. */
   wasm: boolean;
   wasmReason?: string;
+}
+
+export interface AudioSelftestResult {
+  status: 'pass' | 'fail' | 'unavailable';
+  observed?: number;
+  expected?: number;
+  tol?: number;
+  delta?: number;
+  ep?: string;
+  reason: string | null;
+}
+
+/** Same gate, no message hop — the graphs are already in this context. */
+export async function audioSelftest(): Promise<AudioSelftestResult> {
+  return selftest();
 }
 
 export async function probeCapabilities(): Promise<Capabilities | { error: string }> {

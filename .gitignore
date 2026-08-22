@@ -63,6 +63,26 @@ venv/
 /models/audio/*
 !/models/audio/audio_detector.onnx
 !/models/audio/audio_detector.json
+# The v2 chain. It is the ACTIVE audio path now (the server reports audio.active=v2 once its
+# self-test passes), so leaving it out would silently demote a deploy to v1 — the same failure
+# the face model had. Each .onnx names its .onnx.data sidecar from inside the graph, so the
+# pair ships together or neither does. ~20MB. The .pth stays out — it retrains and re-exports,
+# which a deploy never does — but the v2 scripts/ do ship: export_audio_preproc.py and
+# verify_audio_parity.py are the provenance of the self-test, and a parity claim nobody can
+# audit is just a number.
+!/models/audio/v2/
+/models/audio/v2/*
+!/models/audio/v2/scripts/
+!/models/audio/v2/models/
+/models/audio/v2/models/*
+!/models/audio/v2/models/audio/
+/models/audio/v2/models/audio/*
+!/models/audio/v2/models/audio/preproc.onnx
+!/models/audio/v2/models/audio/preproc.onnx.data
+!/models/audio/v2/models/audio/audio_detector.onnx
+!/models/audio/v2/models/audio/audio_detector.onnx.data
+!/models/audio/v2/models/audio/audio_selftest.json
+!/models/audio/v2/models/audio/detector.json
 !/models/images/
 /models/images/*
 !/models/images/npr_detector.onnx

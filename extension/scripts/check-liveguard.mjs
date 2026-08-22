@@ -24,6 +24,12 @@ assert.equal(isOurModel('onnx:trained_checkpoint(detector_v2.onnx)'), true, 'the
 assert.equal(isOurModel('onnx:trained_audio_checkpoint(audio_detector.onnx)'), true, 'the voice model is ours');
 assert.equal(isOurModel('onnx:npr:npr_detector.pth+int8'), true, 'NPR is ours');
 assert.equal(
+  isOurModel('onnx:audio_v2(preproc.onnx -> audio_detector.onnx)'),
+  true,
+  'the v2 audio chain is ours — server and on-device both report this exact string, and ' +
+    'omitting it would make the guard reject every one of its own voice windows'
+);
+assert.equal(
   isOurModel('onnx:trained_checkpoint(detector_v2.onnx) + onnx:npr:npr_detector.pth+int8'),
   true,
   'a fused source naming both is ours'
@@ -90,6 +96,21 @@ if (fs.existsSync(dist)) {
 
   const nprMeta = JSON.parse(fs.readFileSync(path.join(dist, 'models', 'npr.json'), 'utf8'));
   assert.ok(isOurModel(`onnx:${nprMeta.source}`), `NPR bundle must be ours, got "${nprMeta.source}"`);
+
+  // On-device voice is optional — but a half-bundled chain is not. Shipping the .onnx without
+  // its .onnx.data fails at load on the user's machine with a message about a missing tensor,
+  // which is the hardest version of this to diagnose from a bug report.
+  const audioDir = path.join(dist, 'models', 'audio');
+  if (fs.existsSync(audioDir)) {
+    for (const f of ['preproc.onnx', 'preproc.onnx.data', 'audio_detector.onnx',
+                     'audio_detector.onnx.data', 'audio_selftest.json']) {
+      assert.ok(fs.existsSync(path.join(audioDir, f)), `v2 audio chain is missing ${f}`);
+    }
+    console.log('  bundle: v2 audio chain complete (see `npm run check:audio` for the numbers)');
+  } else {
+    console.log('  bundle: no v2 audio chain — on-device voice will report unavailable');
+  }
+
   console.log(`  bundle: face source="${meta.source}" calibrated=${meta.calibrated}, npr="${nprMeta.source}"`);
 } else {
   // Not a pass. The bundle assertions are the point of this file.

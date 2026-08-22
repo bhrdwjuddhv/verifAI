@@ -168,6 +168,20 @@ function copyModels() {
   const out = path.join(dist, 'models');
   fs.mkdirSync(out, { recursive: true });
 
+  // The v2 audio chain. Its filenames are NOT renamed on the way in, unlike everything else
+  // here: each .onnx names its weight sidecar from inside the graph as a bare filename, so
+  // `audio.onnx` looking for `audio_detector.onnx.data` would fail to load with a message
+  // about a missing tensor rather than a missing file. Subdirectory instead of a prefix,
+  // since detector.json is already taken by the face model.
+  const V2 = 'models/audio/v2/models/audio/';
+  const audioChain = [
+    'preproc.onnx',
+    'preproc.onnx.data',
+    'audio_detector.onnx',
+    'audio_detector.onnx.data',
+    'audio_selftest.json',
+  ].map((name) => [V2 + name, 'audio/' + name]);
+
   const wanted = [
     // The trained face model, newest first. The build ships whichever exists; on-device mode
     // reports the filename it loaded, so a stale bundle is visible rather than silent.
@@ -176,6 +190,7 @@ function copyModels() {
     ['models/npr_detector.onnx', 'npr.onnx'],
     ['models/npr_detector.json', 'npr.json'],
     ['models/face_detection_yunet.onnx', 'yunet.onnx'],
+    ...audioChain,
   ];
 
   const missing = [];
@@ -183,7 +198,9 @@ function copyModels() {
   for (const [from, name] of wanted) {
     const src = path.join(repo, from);
     if (fs.existsSync(src)) {
-      fs.copyFileSync(src, path.join(out, name));
+      const dst = path.join(out, name);
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(src, dst);
       const bytes = fs.readFileSync(src);
       shipped.push({
         file: name,

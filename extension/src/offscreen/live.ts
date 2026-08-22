@@ -9,7 +9,13 @@
 const SAMPLE_RATE = 16000;
 
 export interface LiveCaptureHandlers {
-  onWindow: (wav: ArrayBuffer) => void;
+  /**
+   * One completed window, in both forms the two paths need: raw mono samples for the
+   * on-device chain, and WAV for the backend. The samples are handed over rather than
+   * re-decoded from the WAV so the on-device path is not quietly scoring a 16-bit
+   * round-trip of what the server would have seen.
+   */
+  onWindow: (wav: ArrayBuffer, samples: Float32Array, sampleRate: number) => void;
   onError: (message: string) => void;
 }
 
@@ -89,7 +95,7 @@ export async function startCapture(
     }
     chunks = [];
     collected = 0;
-    handlers.onWindow(encodeWav(merged, context!.sampleRate));
+    handlers.onWindow(encodeWav(merged, context!.sampleRate), merged, context!.sampleRate);
   };
 
   source.connect(processor);

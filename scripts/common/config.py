@@ -7,6 +7,32 @@ module, imported by both, so a mismatch is impossible rather than merely unlikel
 
 import os
 
+# Every model path here is written relative to the repo root, which is correct when the
+# service is started the documented way and wrong the moment anyone runs a script from
+# scripts/. That failure is silent and looks identical to a genuinely missing model — it
+# reports "not installed" and quietly serves less. Resolving against the repo root as a
+# fallback makes cwd stop mattering, while a path that resolves from cwd still wins so an
+# explicit relative override behaves as written.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def resolve(path):
+    """The given path if it exists, else the same path relative to the repo root."""
+    if os.path.exists(path) or os.path.isabs(path):
+        return path
+    rooted = os.path.join(REPO_ROOT, path)
+    return rooted if os.path.exists(rooted) else path
+
+
+def env_path(name):
+    """A path from the environment, resolved the same way. None when unset or empty.
+
+    An operator who sets a relative override deserves the same cwd-independence the defaults
+    get; an absolute one is left exactly as given.
+    """
+    value = os.environ.get(name)
+    return resolve(value) if value else None
+
 
 def first_existing(*candidates):
     """First path that exists, else the last one (so error messages name the canonical spot).
@@ -16,22 +42,23 @@ def first_existing(*candidates):
     still wins over both.
     """
     for path in candidates:
-        if os.path.exists(path):
-            return path
-    return candidates[-1]
+        resolved = resolve(path)
+        if os.path.exists(resolved):
+            return resolved
+    return resolve(candidates[-1])
 
 
 # Written by train_deepfake_detector.py, read by inference_server.py. Newest first: a v2
 # checkpoint in models/face/ beats v1, which beats the generic path, which beats the HF
 # fallback. An explicit env var beats all of them.
-MODEL_PATH = os.environ.get("VERIFAI_MODEL") or first_existing(
+MODEL_PATH = env_path("VERIFAI_MODEL") or first_existing(
     os.path.join("models", "face", "deepfake_detector_v2.pth"),
     os.path.join("models", "face", "deepfake_detector.pth"),
     os.path.join("models", "deepfake_detector.pth"),
 )
 
 # The torch-free face classifier. Same precedence.
-ONNX_PATH = os.environ.get("VERIFAI_ONNX") or first_existing(
+ONNX_PATH = env_path("VERIFAI_ONNX") or first_existing(
     os.path.join("models", "face", "detector_v2.onnx"),
     os.path.join("models", "face", "detector.onnx"),
     os.path.join("models", "detector.onnx"),
@@ -63,11 +90,11 @@ REAL_BELOW = float(os.environ.get("VERIFAI_REAL_BELOW", "30"))
 # The locally trained one is therefore reachable but second. To use it:
 #   NPR_MODEL_PATH=models/images/npr_detector.onnx
 # and re-measure with: python scripts/train_npr.py --eval-only --eval-dir <unseen generators>
-NPR_CHECKPOINT = os.environ.get("VERIFAI_NPR_CHECKPOINT") or first_existing(
+NPR_CHECKPOINT = env_path("VERIFAI_NPR_CHECKPOINT") or first_existing(
     os.path.join("models", "npr_detector.pth"),
     os.path.join("models", "images", "npr_detector.pth"),
 )
-NPR_MODEL_PATH = os.environ.get("NPR_MODEL_PATH") or first_existing(
+NPR_MODEL_PATH = env_path("NPR_MODEL_PATH") or first_existing(
     os.path.join("models", "npr_detector.onnx"),
     os.path.join("models", "images", "npr_detector.onnx"),
 )
@@ -106,11 +133,11 @@ VIDEO_MAX_SECONDS = float(os.environ.get("VIDEO_MAX_SECONDS", "60"))
 
 # Voice. Absent by default; the route says so rather than guessing. Train with
 # train_audio_detector.py, export with `export_onnx.py --audio`, drop the .onnx in.
-AUDIO_CHECKPOINT = os.environ.get("VERIFAI_AUDIO_CHECKPOINT") or first_existing(
+AUDIO_CHECKPOINT = env_path("VERIFAI_AUDIO_CHECKPOINT") or first_existing(
     os.path.join("models", "audio", "audio_deepfake_detector.pth"),
     os.path.join("models", "audio_deepfake_detector.pth"),
 )
-AUDIO_MODEL_PATH = os.environ.get("AUDIO_MODEL_PATH") or first_existing(
+AUDIO_MODEL_PATH = env_path("AUDIO_MODEL_PATH") or first_existing(
     os.path.join("models", "audio", "audio_detector.onnx"),
     os.path.join("models", "audio_detector.onnx"),
 )
