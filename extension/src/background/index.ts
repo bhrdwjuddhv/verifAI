@@ -102,6 +102,13 @@ chrome.runtime.onMessage.addListener((message: any, _sender, sendResponse) => {
     startGuard(message.tabId).then(sendResponse);
     return true;
   }
+  // The popup grants a call-site permission (only a click carries the gesture Chrome wants),
+  // then asks for the content script to be registered and injected before monitoring starts.
+  // Registration alone only affects future navigations, and the call tab is already open.
+  if (message?.type === 'guard:sync-sites') {
+    syncContentScripts().then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false }));
+    return true;
+  }
   if (message?.type === 'guard:stop') {
     stopGuard().then(() => sendResponse({ ok: true }));
     return true;

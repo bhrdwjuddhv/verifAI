@@ -118,4 +118,28 @@ if (fs.existsSync(dist)) {
   process.exit(1);
 }
 
+// --- the UI is actually reachable ------------------------------------------------------------
+// Live Guard shipped once with a complete engine and no way to start it: no popup control, and
+// nothing anywhere sent `guard:start`. Every part passed its own test and the feature did not
+// exist for a user. These assert the ignition, not the engine.
+const popupJs = path.join(dist, 'assets', 'popup.js');
+assert.ok(fs.existsSync(popupJs), 'popup bundle must exist');
+const popup = fs.readFileSync(popupJs, 'utf8');
+assert.match(popup, /guard:start/, 'the popup must be able to START monitoring');
+assert.match(popup, /guard:stop/, 'the popup must be able to STOP monitoring');
+assert.match(popup, /guard:get-status/, 'the popup must read live status');
+assert.match(popup, /permissions.*request|request.*permissions/s,
+  'the popup must request the call-site permission itself — the worker has no user gesture');
+
+const background = fs.readFileSync(path.join(dist, 'background.js'), 'utf8');
+assert.match(background, /guard:sync-sites/,
+  'the worker must register the content script after a grant, or the overlay never loads');
+
+// The content script has to reach call tabs independently of auto-scan; tying them together
+// is what made the overlay unreachable on a call.
+const sites = fs.readFileSync(path.join(repo, 'src/background/sites.ts'), 'utf8');
+assert.match(sites, /grantedCallOrigins/,
+  'call origins must get the content script regardless of the auto-scan setting');
+
+console.log('  ui: popup can start/stop Live Guard; call origins register independently');
 console.log('live guard selfcheck passed');

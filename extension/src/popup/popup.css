@@ -135,3 +135,30 @@ footer {
 }
 
 .pill-warn { color: #FBBF24; }
+
+/* Live Guard. Only rendered when the active tab is a call, so it never competes with the
+   scan list on an ordinary page. */
+#guard[hidden] { display: none; }
+#guard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+#guard .guard-head { display: flex; align-items: center; gap: 8px; }
+#guard .guard-head h2 { margin: 0; font-size: 13px; line-height: 1.2; }
+#guard .guard-head .trust { margin-left: auto; font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }
+#guard .site { font-size: 11px; color: var(--text-faint); }
+#guard button { width: 100%; }
+#guard .why { margin: 0; font-size: 11px; color: var(--text-faint); }
+#guard .why.warn { color: #FBBF24; }
+#guard .stats { display: flex; gap: 10px; font-size: 11px; color: var(--text-faint); }
+#guard .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* One cell per scored window: the timeline that makes a sustained signal visible as a run
+   rather than a single number that moved. */
+#guard .timeline { display: flex; gap: 2px; height: 16px; align-items: flex-end; }
+#guard .timeline i { flex: 1; min-width: 2px; border-radius: 1px; background: var(--line); height: 100%; }

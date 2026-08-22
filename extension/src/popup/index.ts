@@ -20,6 +20,7 @@ import {
   setSettings,
 } from '../shared/settings';
 import { append, clear, h } from '../ui/dom';
+import { initGuard } from './guard';
 
 const list = document.getElementById('scans')!;
 const footer = document.getElementById('footer')!;
@@ -72,6 +73,7 @@ async function boot(): Promise<void> {
   paint();
   await paintFooter();
   await paintTabActions();
+  await initGuard();
   await checkForStaleWorker();
 }
 

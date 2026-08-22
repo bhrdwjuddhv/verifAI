@@ -9,6 +9,7 @@
 
 import { getSettings } from '../shared/settings';
 import { AUTO_SITES, matchesHost, type AutoSite } from '../shared/sites';
+import { CALL_ORIGINS } from '../shared/callsites';
 
 export { AUTO_SITES };
 export type { AutoSite };
@@ -29,10 +30,28 @@ export async function grantedSites(): Promise<AutoSite[]> {
  * Registration is all-or-nothing per call rather than incremental: computing the diff would
  * be a second source of truth about what is registered, and the two would drift.
  */
+/**
+ * Call origins the user has granted.
+ *
+ * Separate from auto-scan on purpose: Live Guard needs the content script to draw its overlay,
+ * but it has nothing to do with scanning feeds and must not be switched off with them. Tying
+ * the two together is what left Live Guard unreachable — the overlay could never load on a
+ * call, because the only content script registration was gated behind `autoScan`.
+ */
+export async function grantedCallOrigins(): Promise<string[]> {
+  const granted: string[] = [];
+  for (const origin of CALL_ORIGINS) {
+    if (await chrome.permissions.contains({ origins: [origin] })) granted.push(origin);
+  }
+  return granted;
+}
+
 export async function syncContentScripts(): Promise<void> {
   const settings = await getSettings();
   const sites = await grantedSites();
-  const matches = settings.autoScan ? sites.flatMap((site) => site.origins) : [];
+  const feeds = settings.autoScan ? sites.flatMap((site) => site.origins) : [];
+  // A granted call origin always gets the script, whatever auto-scan is set to.
+  const matches = [...new Set([...feeds, ...(await grantedCallOrigins())])];
 
   const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [SCRIPT_ID] }).catch(() => []);
 
@@ -54,7 +73,7 @@ export async function syncContentScripts(): Promise<void> {
   if (existing.length) await chrome.scripting.updateContentScripts([definition]);
   else await chrome.scripting.registerContentScripts([definition]);
 
-  await adoptOpenTabs(matches);
+  await adoptOpenTabs(matches, feeds);
 }
 
 /**
@@ -64,7 +83,7 @@ export async function syncContentScripts(): Promise<void> {
  * until the page is reloaded — which reads as "the feature is broken", because from the
  * outside it is indistinguishable.
  */
-async function adoptOpenTabs(matches: string[]): Promise<void> {
+async function adoptOpenTabs(matches: string[], feeds: string[]): Promise<void> {
   let tabs: chrome.tabs.Tab[] = [];
   try {
     tabs = await chrome.tabs.query({ url: matches });
@@ -72,11 +91,23 @@ async function adoptOpenTabs(matches: string[]): Promise<void> {
     return;
   }
 
+  const isFeed = async (url?: string) => {
+    if (!url || !feeds.length) return false;
+    try {
+      return (await chrome.tabs.query({ url: feeds })).some((t) => t.url === url);
+    } catch {
+      return false;
+    }
+  };
+
   for (const tab of tabs) {
     if (tab.id === undefined) continue;
     try {
       await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
-      await chrome.tabs.sendMessage(tab.id, { type: 'content:auto', enabled: true });
+      // A call tab gets the script for the Live Guard overlay, but must NOT start watching a
+      // feed: it would sample frames of the call itself, which the worker then rejects because
+      // the origin is not an auto-scan site. Work done to be thrown away, on a video call.
+      await chrome.tabs.sendMessage(tab.id, { type: 'content:auto', enabled: await isFeed(tab.url) });
     } catch {
       // A tab that is still loading, or discarded. It will pick the script up on its own.
     }
