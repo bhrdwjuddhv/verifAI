@@ -10,3 +10,16 @@ pillow
 numpy
 onnxruntime
 opencv-python-headless
+
+# librosa is deliberately NOT here. It pulls numba + scipy (~150MB), which is most of the
+# headroom this build exists to protect.
+#
+# What that costs, exactly:
+#   /predict-audio-window (Live Guard)  unaffected — the v2 chain does its own preprocessing
+#                                       inside the ONNX graph and never imports librosa.
+#   /predict-audio (file upload)        degraded — v1 falls back to a plain STFT magnitude,
+#                                       which is not what the voice model was trained on. The
+#                                       response carries a SERVED WITHOUT librosa caveat.
+#
+# Add `librosa` and `soundfile` here if file-upload voice accuracy matters more than image
+# size on your instance.

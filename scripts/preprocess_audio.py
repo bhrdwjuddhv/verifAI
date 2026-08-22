@@ -38,6 +38,22 @@ SAMPLE_RATE = 16000
 CLIP_SECONDS = 3.0
 
 
+def librosa_available():
+    """Whether the mel path is usable, i.e. whether the served features match the trained ones.
+
+    The fallback below is a plain STFT magnitude, not a mel-spectrogram. It keeps the training
+    pipeline working on a machine without librosa, but a model trained WITH librosa and served
+    WITHOUT it is being fed features it has never seen — and it will still answer, confidently.
+    Callers use this to say so instead of letting the mismatch pass as a verdict.
+    """
+    try:
+        import librosa  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
 def spectrogram_from_samples(y, sr: int = SAMPLE_RATE, out_size: int = 224):
     """Mono float samples -> the same mel-spectrogram image the training set was built from.
 

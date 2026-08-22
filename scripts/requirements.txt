@@ -17,6 +17,14 @@ grad-cam
 # The NPR whole-image detector runs from ONNX in both builds.
 onnxruntime
 
+# Voice. REQUIRED for /predict-audio to be correct, not optional: without librosa the
+# spectrogram code falls back to a plain STFT magnitude, which is not what the voice model
+# was trained on. It answers anyway, so the mismatch is invisible without this installed —
+# the service attaches a loud caveat when it detects the fallback. soundfile is librosa's
+# decoder for anything that is not a 16-bit WAV.
+librosa
+soundfile
+
 # Face detection/cropping (MTCNN). Optional: without it the service still runs, reports
 # faceDetected: null, and says so in `notes`.
 facenet-pytorch

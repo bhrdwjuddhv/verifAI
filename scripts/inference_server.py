@@ -389,7 +389,13 @@ def load_npr_engine():
         def predict(img):
             arr = to_array(img, size, mean, std, crop=True)
             logit = float(session.run(None, {input_name: arr})[0].reshape(-1)[0])
-            return 1.0 / (1.0 + np.exp(-logit))  # official convention: 1 = fake
+            # Branch on the sign rather than exp(-logit) directly: NPR emits logits past
+            # +-700 on decisive inputs, where the naive form overflows and floods the logs
+            # with RuntimeWarning. Same value, no warning, no reliance on inf arithmetic.
+            if logit >= 0:
+                return 1.0 / (1.0 + np.exp(-logit))  # official convention: 1 = fake
+            e = np.exp(logit)
+            return float(e / (1.0 + e))
 
         source = meta_file.get("source", "npr")
         if meta_file.get("quantized"):
@@ -825,6 +831,33 @@ def load_audio_engine():
         return None, {"available": False, "reason": f"{type(e).__name__}: {e}"}
 
 
+def voice_caveats():
+    """Caveats every voice verdict must carry, wherever it was produced.
+
+    The leakage one is not cosmetic. The checkpoint reports perfect validation accuracy with
+    `split: "stratified"` — the same corpora on both sides of the split — so the number
+    describes memorisation as much as detection. It applied to v1 and it applies to v2
+    unchanged: v2 only moved the spectrogram into the graph, the weights and the training data
+    are the same. Kept in one place because it was previously attached to the live-window path
+    and not to file uploads, which is exactly the verdict a user reads most carefully.
+    """
+    notes = []
+    if AUDIO_META.get("valSplit") and "source" not in str(AUDIO_META.get("valSplit")):
+        notes.append("this model's validation split was not source-held-out; its reported "
+                     "accuracy is optimistic until evaluated on an untouched corpus")
+    # The v1 spectrogram silently changes shape when librosa is absent: the fallback is a plain
+    # STFT magnitude, not a mel-spectrogram. The model still answers, on features it was never
+    # trained on. Nothing in the checkpoint records which backend built its training set, so
+    # this cannot be resolved automatically — it can only be stated.
+    from preprocess_audio import librosa_available
+
+    if not librosa_available():
+        notes.append("SERVED WITHOUT librosa: this score came from a plain STFT magnitude, not "
+                     "the mel-spectrogram the model was trained on. Install librosa (see "
+                     "scripts/requirements.txt) before trusting this number")
+    return notes
+
+
 def analyze_audio(path):
     """Audio -> mel-spectrogram -> the voice model. Same bands, same honesty as images.
 
@@ -848,6 +881,7 @@ def analyze_audio(path):
         notes.append("confidence is uncalibrated — treat it as a ranking, not a probability")
     if AUDIO_META.get("quantized"):
         notes.append("int8-quantized build; scores can differ from full precision by a point or two")
+    notes += voice_caveats()
 
     return {
         "verdict": verdict,
@@ -936,6 +970,8 @@ def analyze_audio_window(samples, sr=16000):
         notes = ["v2 chain (preproc.onnx -> CNN), self-test passed"]
         if not AUDIO_V2_META.get("calibrated", False):
             notes.append("uncalibrated — treat as a ranking, not a probability")
+        # v2 shares v1's weights, so it inherits v1's training-split problem too.
+        notes += voice_caveats()
         return {**base, "modelSource": AUDIO_V2_META["modelSource"],
                 "fakeProbability": int(round(100.0 * fake_prob)), "notes": notes}
 
@@ -947,9 +983,7 @@ def analyze_audio_window(samples, sr=16000):
     notes = []
     if not AUDIO_META.get("calibrated", False):
         notes.append("uncalibrated — treat as a ranking, not a probability")
-    if AUDIO_META.get("valSplit") and "source" not in str(AUDIO_META.get("valSplit")):
-        notes.append("this model's validation split was not source-held-out; its reported "
-                     "accuracy is optimistic until evaluated on an untouched corpus")
+    notes += voice_caveats()
     return {**base, "fakeProbability": int(round(100.0 * fake_prob)), "notes": notes}
 
 
