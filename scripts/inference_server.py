@@ -47,8 +47,11 @@ from common.config import (
     HF_FALLBACK_EXPECTS_FACE,
     HF_FALLBACK_MODEL,
     MODEL_PATH,
+    MODEL_CANDIDATES,
+    ONNX_CANDIDATES,
     NPR_MODEL_PATH,
     REAL_BELOW,
+    candidates,
     env_path,
     resolve,
 )
@@ -189,14 +192,14 @@ def to_tensor(img, size):
     return torch.from_numpy(to_array(img, size)[0])
 
 
-def load_checkpoint_engine():
+def load_checkpoint_engine(model_path=None):
     """The model we trained. Preprocessing settings ride along in the checkpoint."""
     import torch
     import torch.nn as nn
     from torchvision import models
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    ckpt = torch.load(MODEL_PATH, map_location=device, weights_only=True)
+    ckpt = torch.load(model_path or MODEL_PATH, map_location=device, weights_only=True)
     classes = ckpt["classes"]
     size = int(ckpt.get("img_size", 224))
     temperature = float(ckpt.get("temperature", 1.0))
@@ -418,10 +421,18 @@ def load_engine():
     loadability, so each attempt has to be allowed to fail.
     """
     attempts = []
-    if os.path.exists(MODEL_PATH):
-        attempts.append((f"checkpoint {MODEL_PATH}", load_checkpoint_engine))
-    if os.path.exists(ONNX_PATH):
-        attempts.append((f"ONNX {ONNX_PATH} (torch-free)", load_onnx_engine))
+    for path in candidates(MODEL_PATH, MODEL_CANDIDATES):
+        if os.path.exists(path):
+            attempts.append((f"checkpoint {path}", lambda p=path: load_checkpoint_engine(p)))
+    for path in candidates(ONNX_PATH, ONNX_CANDIDATES):
+        if os.path.exists(path):
+            attempts.append((f"ONNX {path} (torch-free)", lambda p=path: load_onnx_engine(p)))
+
+    # Configured-but-absent is worth saying out loud. Silence here is how a deploy ends up on
+    # the third-party model with the trained one sitting in the image, unused.
+    if not os.path.exists(ONNX_PATH):
+        print(f"[MODEL] configured VERIFAI_ONNX={ONNX_PATH} does not exist; using the built-in candidates")
+
     attempts.append((f"Hugging Face fallback {HF_FALLBACK_MODEL}", load_hf_engine))
 
     errors = []

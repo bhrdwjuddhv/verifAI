@@ -87,6 +87,16 @@ RUN set -eu; \
       echo "no v2 voice chain in this build; the service will use v1"; \
     fi
 
+# Pin the model paths in the image, so a stale VERIFAI_ONNX / VERIFAI_MODEL left on the host
+# from an older layout cannot point the service at a file that is not here. A platform env var
+# still overrides these; the point is that the image stops depending on the platform being
+# configured correctly in order to serve its own models.
+ENV VERIFAI_ONNX=models/face/detector_v2.onnx \
+    NPR_MODEL_PATH=models/npr_detector.onnx \
+    VERIFAI_YUNET=models/face_detection_yunet.onnx \
+    AUDIO_MODEL_PATH=models/audio/audio_detector.onnx \
+    VERIFAI_AUDIO_V2_DIR=models/audio/v2/models/audio
+
 ENV PORT=8000 \
     VERIFAI_THREADS=2 \
     VERIFAI_SALIENCY_GRID=5 \

@@ -1,0 +1,57 @@
+# Render blueprint for the VerifAI model service.
+#
+# This exists because the build context is load-bearing and easy to get wrong. The trained
+# models live in <repo>/models and the service code in <repo>/scripts, so the context MUST be
+# the repository root — Docker refuses any COPY that climbs above it. A context of scripts/
+# builds a perfectly healthy-looking image that contains no trained model, and the service
+# then answers with the third-party fallback instead of failing.
+#
+# NOTE: a Blueprint does not retroactively reconfigure a service that was created by hand in
+# the dashboard. For an existing service, set these by hand under Settings -> Build & Deploy:
+#
+#   Root Directory                  (empty)
+#   Dockerfile Path                 ./Dockerfile
+#   Docker Build Context Directory  .
+#
+# The first lines of a correct build log read "transferring context: ~74MB". A few kilobytes
+# means Root Directory is still set and the models are not in the image.
+
+services:
+  - type: web
+    name: verifai-model
+    runtime: docker
+    plan: free
+    region: oregon
+
+    # All three together are the fix. dockerContext is the one that actually decides whether
+    # models/ is reachable.
+    rootDir: .
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+
+    healthCheckPath: /health
+
+    envVars:
+      # Model paths are NOT set here on purpose. scripts/common/config.py already resolves each
+      # one, newest first, and a stale env var pointing at a file the image does not have is
+      # how the service ends up reporting "unavailable" for a model that is sitting right
+      # there. Set one only to override the default deliberately.
+      #
+      # Sizing for a 512MB instance: 2 threads, 8 frames per clip. Measured at ~205MB resident
+      # (peak 306MB) against 1262MB for the torch build.
+      - key: VERIFAI_THREADS
+        value: "2"
+      - key: VIDEO_FRAME_CAP
+        value: "8"
+      - key: VERIFAI_SALIENCY_GRID
+        value: "5"
+
+      # Verdict bands on P(fake), percent. Between the two is "uncertain".
+      - key: VERIFAI_FAKE_ABOVE
+        value: "70"
+      - key: VERIFAI_REAL_BELOW
+        value: "30"
+
+      # Restrict once the web app's origin is known; "*" is only sane while testing.
+      - key: VERIFAI_CORS_ORIGINS
+        value: "*"

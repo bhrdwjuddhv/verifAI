@@ -51,18 +51,37 @@ def first_existing(*candidates):
 # Written by train_deepfake_detector.py, read by inference_server.py. Newest first: a v2
 # checkpoint in models/face/ beats v1, which beats the generic path, which beats the HF
 # fallback. An explicit env var beats all of them.
-MODEL_PATH = env_path("VERIFAI_MODEL") or first_existing(
+MODEL_CANDIDATES = [
     os.path.join("models", "face", "deepfake_detector_v2.pth"),
     os.path.join("models", "face", "deepfake_detector.pth"),
     os.path.join("models", "deepfake_detector.pth"),
-)
+]
+MODEL_PATH = env_path("VERIFAI_MODEL") or first_existing(*MODEL_CANDIDATES)
 
 # The torch-free face classifier. Same precedence.
-ONNX_PATH = env_path("VERIFAI_ONNX") or first_existing(
+ONNX_CANDIDATES = [
     os.path.join("models", "face", "detector_v2.onnx"),
     os.path.join("models", "face", "detector.onnx"),
     os.path.join("models", "detector.onnx"),
-)
+]
+ONNX_PATH = env_path("VERIFAI_ONNX") or first_existing(*ONNX_CANDIDATES)
+
+
+def candidates(configured, defaults):
+    """The configured path first, then the built-in ones — deduped, order preserved.
+
+    An env var that points at a file the image does not have must not cost us the models it
+    DOES have. That exact case put a deploy on the third-party fallback: VERIFAI_ONNX named a
+    path from an older layout, the loader found nothing there, and skipped a perfectly good
+    trained model sitting two directories away. Configured still wins when it loads; it just
+    no longer takes the alternatives down with it.
+    """
+    out = []
+    for path in [configured, *defaults]:
+        resolved = resolve(path)
+        if resolved not in out:
+            out.append(resolved)
+    return out
 
 # Used only when no trained checkpoint exists. Verified against the Hugging Face API
 # on 2026-08-15: ViTForImageClassification, 224px, id2label {0: Realism, 1: Deepfake}.
